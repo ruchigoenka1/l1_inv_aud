@@ -41,7 +41,6 @@ lead_time_manual = st.sidebar.number_input("Standard Lead Time (Days)", value=3,
 # ------------------------------------------------
 
 def run_full_audit(df, lt, u_val, h_pct, o_cost):
-    """Standardizes data and calculates core inventory metrics."""
     df.columns = [c.strip().title() for c in df.columns]
     df['Date'] = pd.to_datetime(df['Date'])
     df = df.sort_values('Date').reset_index(drop=True)
@@ -62,111 +61,109 @@ def run_full_audit(df, lt, u_val, h_pct, o_cost):
     
     return df
 
-def run_prophet_and_segregate(df):
-    """Uses Prophet to decompose signals and segregate data by seasonality."""
+def run_prophet_analysis(df):
     m_df = df[['Date', 'Demand']].rename(columns={'Date': 'ds', 'Demand': 'y'})
     m = Prophet(yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=False)
     m.fit(m_df)
+    
+    # Predict on existing dates to get components
     forecast = m.predict(m_df)
     
-    # Extract components
+    # Merge components back to original DF
     df['Trend'] = forecast['trend']
-    df['Seasonal_Effect'] = forecast['additive_terms'] # Weekly + Yearly
+    df['Weekly_Effect'] = forecast['weekly']
+    df['Yearly_Effect'] = forecast['yearly']
+    df['Seasonal_Effect'] = forecast['additive_terms']
     
-    # Segregation Logic based on Seasonal Strength
+    # Segregation Logic
     high_thresh = df['Seasonal_Effect'].quantile(0.75)
     low_thresh = df['Seasonal_Effect'].quantile(0.25)
-    
-    conditions = [
-        (df['Seasonal_Effect'] >= high_thresh),
-        (df['Seasonal_Effect'] <= low_thresh)
-    ]
+    conditions = [(df['Seasonal_Effect'] >= high_thresh), (df['Seasonal_Effect'] <= low_thresh)]
     df['Season_Type'] = np.select(conditions, ['High Season', 'Low Season'], default='Normal')
     
-    return df, m
+    return df, m, forecast
 
 # ------------------------------------------------
 # 4. Main UI Logic
 # ------------------------------------------------
 if uploaded_file:
-    # 1. Initial Audit
     raw_df = pd.read_excel(uploaded_file)
     df = run_full_audit(raw_df, lead_time_manual, unit_val_input, holding_cost_pct, ordering_cost)
     
     t1, t2 = st.tabs(["📊 Performance Audit", "📈 AI Demand Analyzer"])
 
-    # --- TAB 1: PERFORMANCE AUDIT ---
     with t1:
+        # Metrics & Inventory Chart (Same as before)
         total_d = df['Demand'].sum()
         fill_rate = (1 - (df['Shortage'].sum() / total_d)) * 100 if total_d > 0 else 100
-        
         k1, k2, k3, k4, k5 = st.columns(5)
         k1.metric("Stockout Days", int(df['IsStockout'].sum()))
-        k2.metric("Actual Fill Rate", f"{fill_rate:.1f}%")
-        k3.metric("Avg Inventory", f"{df['Closing Balance'].mean():.1f}")
-        k4.metric("Avg WC Investment", f"${(df['Closing Balance'].mean() * unit_val_input):,.0f}")
-        k5.metric("Total Policy Cost", f"${(df['HoldingCost'].sum() + df['OrderingCost'].sum()):,.0f}")
+        k2.metric("Fill Rate", f"{fill_rate:.1f}%")
+        k3.metric("Avg Inv", f"{df['Closing Balance'].mean():.1f}")
+        k4.metric("Avg WC", f"${(df['Closing Balance'].mean() * unit_val_input):,.0f}")
+        k5.metric("Policy Cost", f"${(df['HoldingCost'].sum() + df['OrderingCost'].sum()):,.0f}")
 
-        st.subheader("Inventory Flow & Lead Time Windows")
         fig = go.Figure()
-        
-        # Lead Time Shading
         fig.add_trace(go.Scatter(x=df["Date"], y=np.where(df["InLT"], df["Closing Balance"].max(), np.nan),
-            fill='tozeroy', fillcolor='rgba(255, 0, 0, 0.05)', line=dict(width=0), name="Lead Time Window"))
-        
-        # Physical Stock Line
+            fill='tozeroy', fillcolor='rgba(255, 0, 0, 0.05)', line=dict(width=0), name="LT Window"))
         fig.add_trace(go.Scatter(x=df["Date"], y=df["Closing Balance"], name="Closing Stock", line=dict(color='#00CCFF', width=2.5)))
-        
-        # Order Placed Markers
         placed = df[df["Order Placed"] > 0]
         if not placed.empty:
             fig.add_trace(go.Scatter(x=placed["Date"], y=placed["Closing Balance"], mode="markers", name="Order Placed", 
                                      marker=dict(color="#00FF00", size=10, symbol="triangle-up")))
-        
         fig.update_layout(template="plotly_dark", height=450, hovermode="x unified")
         st.plotly_chart(fig, use_container_width=True)
-        
         st.dataframe(df, use_container_width=True)
 
-    # --- TAB 2: DEMAND ANALYZER ---
     with t2:
         st.header("📈 AI Demand DNA & Seasonal Segregation")
         
-        if st.button("🚀 Run Prophet AI Decomposition"):
-            with st.spinner("Decomposing patterns and segregating seasons..."):
-                df, model = run_prophet_and_segregate(df)
+        if st.button("🚀 Run Prophet AI Analysis"):
+            with st.spinner("Decoding weekly and yearly signals..."):
+                df, model, forecast = run_prophet_analysis(df)
                 
-                # A. Seasonality Segregation Stats
-                st.subheader("Inventory Metrics by Season Category")
-                stats = df.groupby('Season_Type').agg({
-                    'Demand': 'mean',
-                    'Shortage': 'sum',
-                    'IsStockout': 'sum',
-                    'Closing Balance': 'mean'
+                # A. Segment Stats Table
+                st.subheader("Inventory Metrics by Season Segment")
+                stats = df.groupby('Season_Type').agg({'Demand': 'mean','Shortage': 'sum','IsStockout': 'sum','Closing Balance': 'mean'
                 }).rename(columns={'Demand': 'Avg Demand', 'IsStockout': 'Stockout Days', 'Closing Balance': 'Avg Stock'})
-                
-                c1, c2 = st.columns([1, 2])
-                with c1:
-                    st.write("**Segment Analysis**")
-                    st.dataframe(stats.style.highlight_max(axis=0, color='#1B4D3E'))
-                with c2:
-                    fig_box = px.box(df, x="Season_Type", y="Demand", color="Season_Type", 
-                                     color_discrete_map={"High Season": "#F56565", "Normal": "#63B3ED", "Low Season": "#4FD1C5"},
-                                     title="Demand Distribution per Segment")
-                    fig_box.update_layout(template="plotly_dark", height=350)
-                    st.plotly_chart(fig_box, use_container_width=True)
+                st.table(stats)
 
-                st.divider()
-
-                # B. Market DNA Components
+                # B. Trend vs Actual
                 st.subheader("Signal Decomposition")
                 fig_trend = px.line(df, x="Date", y=["Demand", "Trend"], title="Underlying Trend vs. Actuals",
                                     color_discrete_map={"Demand": "#4A5568", "Trend": "#F6AD55"})
                 st.plotly_chart(fig_trend, use_container_width=True)
 
+                # --- NEW: WEEKLY & YEARLY GRAPHS ---
+                c1, c2 = st.columns(2)
+                
+                with c1:
+                    st.write("**Weekly Seasonality Profile**")
+                    # Extract one week of day-of-week effects
+                    # Prophet stores the weekly component per date; we map to day names
+                    weekly_df = df.copy()
+                    weekly_df['Day'] = weekly_df['Date'].dt.day_name()
+                    # Average the effect per day to get a clean profile
+                    weekly_profile = weekly_df.groupby('Day')['Weekly_Effect'].mean().reindex(
+                        ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+                    ).reset_index()
+                    
+                    fig_w = px.bar(weekly_profile, x='Day', y='Weekly_Effect', 
+                                   title="Avg Demand Deviation by Day",
+                                   color='Weekly_Effect', color_continuous_scale='RdBu_r')
+                    st.plotly_chart(fig_w, use_container_width=True)
+
+                with c2:
+                    st.write("**Yearly Seasonality Profile**")
+                    # Show the yearly wave over the dataset
+                    fig_y = px.line(df, x="Date", y="Yearly_Effect", 
+                                    title="Annual Demand Cycle (AI Prediction)",
+                                    line_shape='spline', color_discrete_sequence=['#FFCC00'])
+                    st.plotly_chart(fig_y, use_container_width=True)
+
         st.divider()
 
-        # C. Risk Gap Analysis (The Request: SL vs Max)
+        # Risk Analysis
         st.subheader("Risk & Service Level Analysis")
         window_size = st.slider("Analysis Window (Days)", 1, 30, 7)
         rolling_demand = df['Demand'].rolling(window=window_size).sum().dropna()
@@ -178,17 +175,16 @@ if uploaded_file:
             risk_gap = max_val - sl_threshold
             
             r1, r2, r3, r4 = st.columns(4)
-            r1.metric(f"{int(target_sl*100)}% SL Requirement", f"{int(sl_threshold)}")
-            r2.metric("Max Observed (Worst Case)", f"{int(max_val)}")
-            r3.metric("The Risk Gap", f"{int(risk_gap)} Units", delta="Uncovered", delta_color="inverse")
-            r4.metric("Financial Exposure", f"${int(risk_gap * unit_val_input):,}")
+            r1.metric(f"{int(target_sl*100)}% SL Stock", f"{int(sl_threshold)}")
+            r2.metric("Max Observed", f"{int(max_val)}")
+            r3.metric("The Risk Gap", f"{int(risk_gap)}", delta="Uncovered Units", delta_color="inverse")
+            r4.metric("Risk Financials", f"${int(risk_gap * unit_val_input):,}")
 
-            fig_risk = px.histogram(rolling_demand, nbins=20, title="Demand Probability Distribution", color_discrete_sequence=['#718096'])
+            fig_risk = px.histogram(rolling_demand, nbins=20, title="Demand Probability Distribution")
             fig_risk.add_vline(x=sl_threshold, line_dash="dash", line_color="yellow", annotation_text="SL Target")
             fig_risk.add_vline(x=max_val, line_dash="dot", line_color="red", annotation_text="Absolute Max")
             fig_risk.add_vrect(x0=sl_threshold, x1=max_val, fillcolor="red", opacity=0.15, layer="below", line_width=0, annotation_text="RISK ZONE")
-            
-            fig_risk.update_layout(template="plotly_dark", height=400)
             st.plotly_chart(fig_risk, use_container_width=True)
+
 else:
-    st.info("👋 Ready to Audit. Upload your Excel file with columns: Date, Opening Balance, Demand, Order Received, Closing Balance.")
+    st.info("👋 Upload your Excel to begin the Audit.")
