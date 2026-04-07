@@ -14,10 +14,10 @@ st.set_page_config(layout="wide", page_title="AI Inventory Auditor Pro")
 st.markdown(
     """
     <style>
-    .block-container { padding: 2rem 5rem; }
-    [data-testid="stMetricValue"] { font-size: 1.8rem !important; }
-    [data-testid="stMetricLabel"] { font-size: 0.9rem !important; font-weight: bold !important; }
-    .stButton>button { width: 100%; font-weight: bold; }
+    .block-container { padding: 1.5rem 5rem; }
+    [data-testid="stMetricValue"] { font-size: 1.6rem !important; color: #00CCFF !important; }
+    [data-testid="stMetricLabel"] { font-size: 0.85rem !important; font-weight: bold !important; }
+    .stButton>button { width: 100%; font-weight: bold; background-color: #2E7D32 !important; color: white !important; }
     </style>
     """,
     unsafe_allow_html=True
@@ -62,29 +62,38 @@ def run_full_audit(df, lt, u_val, h_pct, o_cost):
     
     return df
 
-def run_prophet_analysis(df):
-    """Decomposes demand into Trend and Seasonality using Prophet."""
+def run_prophet_and_segregate(df):
+    """Uses Prophet to decompose signals and segregate data by seasonality."""
     m_df = df[['Date', 'Demand']].rename(columns={'Date': 'ds', 'Demand': 'y'})
-    # Prophet works best with > 30-60 days of data
     m = Prophet(yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=False)
     m.fit(m_df)
     forecast = m.predict(m_df)
     
     # Extract components
     df['Trend'] = forecast['trend']
-    df['Weekly_Effect'] = forecast['weekly']
-    df['Yearly_Effect'] = forecast['yearly']
+    df['Seasonal_Effect'] = forecast['additive_terms'] # Weekly + Yearly
+    
+    # Segregation Logic based on Seasonal Strength
+    high_thresh = df['Seasonal_Effect'].quantile(0.75)
+    low_thresh = df['Seasonal_Effect'].quantile(0.25)
+    
+    conditions = [
+        (df['Seasonal_Effect'] >= high_thresh),
+        (df['Seasonal_Effect'] <= low_thresh)
+    ]
+    df['Season_Type'] = np.select(conditions, ['High Season', 'Low Season'], default='Normal')
+    
     return df, m
 
 # ------------------------------------------------
 # 4. Main UI Logic
 # ------------------------------------------------
 if uploaded_file:
-    # Load and process basic audit
-    data_load = pd.read_excel(uploaded_file)
-    df = run_full_audit(data_load, lead_time_manual, unit_val_input, holding_cost_pct, ordering_cost)
+    # 1. Initial Audit
+    raw_df = pd.read_excel(uploaded_file)
+    df = run_full_audit(raw_df, lead_time_manual, unit_val_input, holding_cost_pct, ordering_cost)
     
-    t1, t2 = st.tabs(["📊 Performance Audit", "📈 Demand Analyzer"])
+    t1, t2 = st.tabs(["📊 Performance Audit", "📈 AI Demand Analyzer"])
 
     # --- TAB 1: PERFORMANCE AUDIT ---
     with t1:
@@ -93,10 +102,10 @@ if uploaded_file:
         
         k1, k2, k3, k4, k5 = st.columns(5)
         k1.metric("Stockout Days", int(df['IsStockout'].sum()))
-        k2.metric("Fill Rate", f"{fill_rate:.1f}%")
-        k3.metric("Avg Inv (Units)", f"{df['Closing Balance'].mean():.1f}")
-        k4.metric("Avg Capital Tie-up", f"${(df['Closing Balance'].mean() * unit_val_input):,.0f}")
-        k5.metric("Policy Cost", f"${(df['HoldingCost'].sum() + df['OrderingCost'].sum()):,.0f}")
+        k2.metric("Actual Fill Rate", f"{fill_rate:.1f}%")
+        k3.metric("Avg Inventory", f"{df['Closing Balance'].mean():.1f}")
+        k4.metric("Avg WC Investment", f"${(df['Closing Balance'].mean() * unit_val_input):,.0f}")
+        k5.metric("Total Policy Cost", f"${(df['HoldingCost'].sum() + df['OrderingCost'].sum()):,.0f}")
 
         st.subheader("Inventory Flow & Lead Time Windows")
         fig = go.Figure()
@@ -105,10 +114,10 @@ if uploaded_file:
         fig.add_trace(go.Scatter(x=df["Date"], y=np.where(df["InLT"], df["Closing Balance"].max(), np.nan),
             fill='tozeroy', fillcolor='rgba(255, 0, 0, 0.05)', line=dict(width=0), name="Lead Time Window"))
         
-        # Closing Balance Line
+        # Physical Stock Line
         fig.add_trace(go.Scatter(x=df["Date"], y=df["Closing Balance"], name="Closing Stock", line=dict(color='#00CCFF', width=2.5)))
         
-        # Order Markers
+        # Order Placed Markers
         placed = df[df["Order Placed"] > 0]
         if not placed.empty:
             fig.add_trace(go.Scatter(x=placed["Date"], y=placed["Closing Balance"], mode="markers", name="Order Placed", 
@@ -117,43 +126,49 @@ if uploaded_file:
         fig.update_layout(template="plotly_dark", height=450, hovermode="x unified")
         st.plotly_chart(fig, use_container_width=True)
         
-        with st.expander("🔍 View Raw Audit Logs"):
-            st.dataframe(df, use_container_width=True)
+        st.dataframe(df, use_container_width=True)
 
     # --- TAB 2: DEMAND ANALYZER ---
     with t2:
-        st.header("📈 Demand DNA & Risk Analysis")
+        st.header("📈 AI Demand DNA & Seasonal Segregation")
         
-        # 1. Prophet AI Decomposition
-        st.subheader("AI Seasonality Decomposition")
-        if st.button("✨ Run Prophet AI Analysis"):
-            with st.spinner("Decoding seasonality patterns..."):
-                df, model = run_prophet_analysis(df)
+        if st.button("🚀 Run Prophet AI Decomposition"):
+            with st.spinner("Decomposing patterns and segregating seasons..."):
+                df, model = run_prophet_and_segregate(df)
                 
-                # Plot Trend vs Actual
-                fig_trend = px.line(df, x="Date", y=["Demand", "Trend"], 
-                                    title="Market Trend vs. Actual Daily Demand",
+                # A. Seasonality Segregation Stats
+                st.subheader("Inventory Metrics by Season Category")
+                stats = df.groupby('Season_Type').agg({
+                    'Demand': 'mean',
+                    'Shortage': 'sum',
+                    'IsStockout': 'sum',
+                    'Closing Balance': 'mean'
+                }).rename(columns={'Demand': 'Avg Demand', 'IsStockout': 'Stockout Days', 'Closing Balance': 'Avg Stock'})
+                
+                c1, c2 = st.columns([1, 2])
+                with c1:
+                    st.write("**Segment Analysis**")
+                    st.dataframe(stats.style.highlight_max(axis=0, color='#1B4D3E'))
+                with c2:
+                    fig_box = px.box(df, x="Season_Type", y="Demand", color="Season_Type", 
+                                     color_discrete_map={"High Season": "#F56565", "Normal": "#63B3ED", "Low Season": "#4FD1C5"},
+                                     title="Demand Distribution per Segment")
+                    fig_box.update_layout(template="plotly_dark", height=350)
+                    st.plotly_chart(fig_box, use_container_width=True)
+
+                st.divider()
+
+                # B. Market DNA Components
+                st.subheader("Signal Decomposition")
+                fig_trend = px.line(df, x="Date", y=["Demand", "Trend"], title="Underlying Trend vs. Actuals",
                                     color_discrete_map={"Demand": "#4A5568", "Trend": "#F6AD55"})
                 st.plotly_chart(fig_trend, use_container_width=True)
-                
-                c1, c2 = st.columns(2)
-                with c1:
-                    # Weekly Component
-                    # We map days to names for clarity
-                    weekly_sample = df.tail(7).copy()
-                    weekly_sample['Day'] = weekly_sample['Date'].dt.day_name()
-                    fig_w = px.bar(weekly_sample, x='Day', y='Weekly_Effect', title="Weekly Pattern (Day of Week Effect)")
-                    st.plotly_chart(fig_w, use_container_width=True)
-                with c2:
-                    # Yearly Component
-                    fig_y = px.line(df, x="Date", y="Yearly_Effect", title="Annual Cycle (Yearly Seasonality)")
-                    st.plotly_chart(fig_y, use_container_width=True)
 
         st.divider()
 
-        # 2. Risk Gap Analysis
+        # C. Risk Gap Analysis (The Request: SL vs Max)
         st.subheader("Risk & Service Level Analysis")
-        window_size = st.slider("Select Analysis Window (Days)", 1, 30, 7)
+        window_size = st.slider("Analysis Window (Days)", 1, 30, 7)
         rolling_demand = df['Demand'].rolling(window=window_size).sum().dropna()
         
         if not rolling_demand.empty:
@@ -165,7 +180,7 @@ if uploaded_file:
             r1, r2, r3, r4 = st.columns(4)
             r1.metric(f"{int(target_sl*100)}% SL Requirement", f"{int(sl_threshold)}")
             r2.metric("Max Observed (Worst Case)", f"{int(max_val)}")
-            r3.metric("The Risk Gap", f"{int(risk_gap)}", delta="Uncovered Units", delta_color="inverse")
+            r3.metric("The Risk Gap", f"{int(risk_gap)} Units", delta="Uncovered", delta_color="inverse")
             r4.metric("Financial Exposure", f"${int(risk_gap * unit_val_input):,}")
 
             fig_risk = px.histogram(rolling_demand, nbins=20, title="Demand Probability Distribution", color_discrete_sequence=['#718096'])
@@ -175,8 +190,5 @@ if uploaded_file:
             
             fig_risk.update_layout(template="plotly_dark", height=400)
             st.plotly_chart(fig_risk, use_container_width=True)
-        else:
-            st.warning("Not enough data points for the selected window size.")
-
 else:
-    st.info("👋 Welcome! Please upload your inventory Excel file to begin the audit. Required columns: Date, Opening Balance, Demand, Order Received, Closing Balance.")
+    st.info("👋 Ready to Audit. Upload your Excel file with columns: Date, Opening Balance, Demand, Order Received, Closing Balance.")
