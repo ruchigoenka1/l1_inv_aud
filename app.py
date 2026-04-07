@@ -38,11 +38,13 @@ def run_prophet_stratification_smoothed(df):
     m.fit(m_df)
     forecast = m.predict(m_df)
     
-    # 1. Smoothing the seasonal signal (14-day window)
+    # Extract components
+    df['Trend'] = forecast['trend']
     df['Raw_Seasonal'] = forecast['additive_terms']
+    
+    # 14-day Smoothing for Zone Classification
     df['Smoothed_Seasonal'] = df['Raw_Seasonal'].rolling(window=14, center=True).mean().ffill().bfill()
     
-    # 2. Zone Classification (Top/Bottom 15%)
     high_v = df['Smoothed_Seasonal'].quantile(0.85)
     low_v = df['Smoothed_Seasonal'].quantile(0.15)
     
@@ -74,6 +76,7 @@ if uploaded_file:
     t1, t2 = st.tabs(["📊 Inventory Performance", "🕵️ Demand Stratification"])
 
     with t1:
+        # Standard Performance Metrics
         total_d = df['Demand'].sum()
         fill_rate = (1 - (df['Shortage'].sum() / total_d)) * 100 if total_d > 0 else 100
         k1, k2, k3, k4 = st.columns(4)
@@ -89,51 +92,51 @@ if uploaded_file:
         st.plotly_chart(fig, use_container_width=True)
 
     with t2:
-        st.header("🕵️ Demand Stratification & Zone DNA")
+        st.header("🕵️ Demand Stratification & Trend Analysis")
         
-        if st.button("🚀 Run AI Stratification"):
-            with st.spinner("Decoding seasonality and smoothing zones..."):
+        if st.button("🚀 Run AI Analysis"):
+            with st.spinner("Decoding DNA & extracting trend..."):
                 df = run_prophet_stratification_smoothed(df)
                 
-                # --- NEW: DEMAND LINE WITH ZONE BACKGROUNDS ---
-                st.subheader("Daily Demand & Seasonal Zones")
-                st.info("This graph shows your actual daily demand colored by the AI-detected 'Seasonal Zone'.")
+                # --- TREND & DEMAND GRAPH ---
+                st.subheader("Historical Demand & AI Trend Line")
+                show_trend = st.checkbox("🔍 Overlay Underlying Trend Line", value=True)
                 
-                fig_demand = px.line(df, x='Date', y='Demand', 
-                                     title="Historical Demand Overlaid with Seasonal Zones",
-                                     color_discrete_sequence=['#FFFFFF']) # White line for contrast
-                
-                # Update line colors based on Zone for a 'Heatmap' effect
                 fig_demand = px.scatter(df, x='Date', y='Demand', color='Zone',
                                         color_discrete_map={"Peak Season": "#F56565", "Normal Season": "#63B3ED", "Low Season": "#4FD1C5"},
-                                        title="Demand Distribution Over Time (By Zone)")
-                fig_demand.add_trace(go.Scatter(x=df['Date'], y=df['Demand'], line=dict(color='rgba(255,255,255,0.3)', width=1), showlegend=False))
+                                        title="Demand Distribution with Seasonal Zones")
                 
-                fig_demand.update_layout(template="plotly_dark", height=400)
+                if show_trend:
+                    fig_demand.add_trace(go.Scatter(x=df['Date'], y=df['Trend'], 
+                                                   mode='lines', name='Growth Trend', 
+                                                   line=dict(color='#FFA500', width=3, dash='dash')))
+                
+                # Connect the dots with a faint line
+                fig_demand.add_trace(go.Scatter(x=df['Date'], y=df['Demand'], 
+                                               line=dict(color='rgba(255,255,255,0.2)', width=1), 
+                                               showlegend=False))
+                
+                fig_demand.update_layout(template="plotly_dark", height=450)
                 st.plotly_chart(fig_demand, use_container_width=True)
 
                 # --- THE STRATIFIED TABLE ---
                 st.subheader("📋 Segmented Demand Log")
                 st.dataframe(df[["Date", "Demand", "Zone"]], use_container_width=True, height=350)
 
-                # --- SEGMENTED HISTOGRAM ---
+                # --- HISTOGRAM & SAFETY STOCK ---
                 st.divider()
-                st.subheader("📊 Probability Distribution by Zone")
-                fig_hist = px.histogram(
-                    df, x="Demand", color="Zone", 
-                    nbins=30, barmode='overlay', opacity=0.7,
-                    color_discrete_map={"Peak Season": "#F56565", "Normal Season": "#63B3ED", "Low Season": "#4FD1C5"},
-                    title="Comparison of Demand Volatility Across Zones"
-                )
-                fig_hist.update_layout(template="plotly_dark")
-                st.plotly_chart(fig_hist, use_container_width=True)
-
-                # --- SAFETY STOCK BY ZONE ---
-                st.divider()
-                st.subheader("🛡️ Tailored Safety Stock Strategy")
-                zone_stats = df.groupby('Zone').agg({'Demand': ['mean', 'std', 'max']}).reset_index()
-                zone_stats.columns = ['Zone', 'Avg Demand', 'Volatility (StdDev)', 'Absolute Max']
-                zone_stats['Rec. Safety Stock'] = (1.65 * zone_stats['Volatility (StdDev)'] * np.sqrt(lt_manual)).round(0)
-                st.table(zone_stats)
+                st.subheader("📊 Probability & Strategy")
+                c_hist, c_stats = st.columns([2, 1])
+                
+                with c_hist:
+                    fig_hist = px.histogram(df, x="Demand", color="Zone", barmode='overlay', opacity=0.7,
+                                            color_discrete_map={"Peak Season": "#F56565", "Normal Season": "#63B3ED", "Low Season": "#4FD1C5"})
+                    st.plotly_chart(fig_hist, use_container_width=True)
+                
+                with c_stats:
+                    zone_stats = df.groupby('Zone').agg({'Demand': ['mean', 'std']}).reset_index()
+                    zone_stats.columns = ['Zone', 'Avg', 'Volatility']
+                    zone_stats['Safety Stock'] = (1.65 * zone_stats['Volatility'] * np.sqrt(lt_manual)).round(0)
+                    st.table(zone_stats)
 else:
     st.info("Upload your Excel audit file to begin.")
