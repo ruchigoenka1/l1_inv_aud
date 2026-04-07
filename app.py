@@ -62,18 +62,21 @@ def run_full_audit(df, lt, u_val, h_pct, o_cost):
 
 def run_prophet_analysis(df):
     m_df = df[['Date', 'Demand']].rename(columns={'Date': 'ds', 'Demand': 'y'})
+    
+    # Initialize Prophet with Weekly, Yearly, AND Monthly (Custom) seasonality
     m = Prophet(yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=False)
+    m.add_seasonality(name='monthly', period=30.5, fourier_order=5)
+    
     m.fit(m_df)
     forecast = m.predict(m_df)
     
     df['Trend'] = forecast['trend']
     df['Weekly_Effect'] = forecast['weekly']
+    df['Monthly_Effect'] = forecast['monthly'] if 'monthly' in forecast else 0
     df['Yearly_Effect'] = forecast['yearly']
     df['Seasonal_Effect'] = forecast['additive_terms']
     
-    # Residuals (Noise) calculation
-    df['Residuals'] = df['Demand'] - df['Trend'] - df['Seasonal_Effect']
-    
+    # Classification Logic
     high_thresh = df['Seasonal_Effect'].quantile(0.75)
     low_thresh = df['Seasonal_Effect'].quantile(0.25)
     df['Season_Type'] = np.select(
@@ -93,7 +96,6 @@ if uploaded_file:
     t1, t2 = st.tabs(["📊 Performance Audit", "📈 AI Demand Analyzer"])
 
     with t1:
-        # Metrics & Inventory Chart (Standardized)
         total_d = df['Demand'].sum()
         fill_rate = (1 - (df['Shortage'].sum() / total_d)) * 100 if total_d > 0 else 100
         k1, k2, k3, k4, k5 = st.columns(5)
@@ -113,62 +115,59 @@ if uploaded_file:
                                      marker=dict(color="#00FF00", size=10, symbol="triangle-up")))
         fig.update_layout(template="plotly_dark", height=450, hovermode="x unified")
         st.plotly_chart(fig, use_container_width=True)
-        st.dataframe(df, use_container_width=True)
 
     with t2:
-        st.header("📈 AI Demand DNA & Seasonal Thresholds")
+        st.header("📈 Hybrid Demand DNA Analysis")
         
-        # --- THRESHOLD SETTING ---
-        st.subheader("📡 Signal Sensitivity Settings")
-        col_t1, col_t2 = st.columns([1, 2])
+        # --- HYBRID THRESHOLD SETTINGS ---
+        st.subheader("📡 Pattern Significance Thresholds")
+        col_t1, col_t2 = st.columns(2)
         with col_t1:
-            # Users can set the minimum unit swing they care about
-            sig_threshold = st.slider("Significance Threshold (Units)", 1, 50, 5, help="Ignore weekly patterns smaller than this value.")
+            unit_thresh = st.slider("Min. Unit Swing", 1, 50, 10, help="Minimum units for a pattern to matter.")
+        with col_t2:
+            pct_thresh = st.slider("Min. % of Average Demand", 1, 50, 10, help="Minimum percentage impact relative to average.")
         
-        if st.button("🚀 Run Signal Analysis"):
-            with st.spinner("Filtering noise from signal..."):
+        if st.button("🚀 Execute Multi-Seasonality Audit"):
+            with st.spinner("Decomposing Trend, Weekly, Monthly, and Yearly signals..."):
                 df, model = run_prophet_analysis(df)
                 
                 # Significance Logic
                 weekly_swing = df['Weekly_Effect'].max() - df['Weekly_Effect'].min()
-                noise_lvl = df['Residuals'].std()
-                is_significant = weekly_swing >= sig_threshold
+                avg_demand = df['Demand'].mean()
+                pct_impact = (weekly_swing / avg_demand) * 100 if avg_demand > 0 else 0
+                
+                # Hybrid Gate: Pattern is significant if it passes BOTH (or EITHER, depending on preference)
+                # Here we use BOTH for strictness
+                is_significant = (weekly_swing >= unit_thresh) and (pct_impact >= pct_thresh)
 
-                # --- SIGNAL STATUS ALERT ---
                 if is_significant:
-                    st.success(f"✅ **Significant Pattern Found:** Weekly swing is **{weekly_swing:.1f} units**. This exceeds your threshold of {sig_threshold} units.")
+                    st.success(f"✅ **SIGNIFICANT:** Weekly swing is {weekly_swing:.1f} units ({pct_impact:.1f}% of avg). This warrants a tailored ordering schedule.")
                 else:
-                    st.warning(f"⚠️ **Insignificant Pattern:** Weekly swing is only **{weekly_swing:.1f} units**. This is below your threshold of {sig_threshold}. Use a flat daily average instead.")
+                    st.warning(f"⚠️ **INSIGNIFICANT:** Swing of {weekly_swing:.1f} units ({pct_impact:.1f}%) is too small to adjust operations. Stick to simple averages.")
 
                 # A. Segment Stats Table
-                st.subheader("Seasonal Segment Performance")
+                st.subheader("Seasonal Segment Audit")
                 stats = df.groupby('Season_Type').agg({'Demand': 'mean','Shortage': 'sum','IsStockout': 'sum','Closing Balance': 'mean'
                 }).rename(columns={'Demand': 'Avg Demand', 'IsStockout': 'Stockout Days', 'Closing Balance': 'Avg Stock'})
                 st.table(stats)
 
-                # B. Trend vs Actual
-                fig_trend = px.line(df, x="Date", y=["Demand", "Trend"], title="Underlying Trend vs. Actuals",
-                                    color_discrete_map={"Demand": "#4A5568", "Trend": "#F6AD55"})
-                st.plotly_chart(fig_trend, use_container_width=True)
-
-                # C. Weekly & Yearly Profiles (If significant)
+                # B. Weekly & Monthly Profile Charts
                 c1, c2 = st.columns(2)
                 with c1:
                     weekly_profile = df.copy()
                     weekly_profile['Day'] = weekly_profile['Date'].dt.day_name()
                     profile = weekly_profile.groupby('Day')['Weekly_Effect'].mean().reindex(
                         ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']).reset_index()
-                    
-                    # Apply grayscale if not significant to visually downplay it
-                    color_scale = 'RdBu_r' if is_significant else ['#4A5568'] * 7
-                    fig_w = px.bar(profile, x='Day', y='Weekly_Effect', title="Avg Weekly Profile",
-                                   color='Weekly_Effect', color_continuous_scale=color_scale)
+                    fig_w = px.bar(profile, x='Day', y='Weekly_Effect', title="Weekly Pattern Profile",
+                                   color='Weekly_Effect', color_continuous_scale='RdBu_r' if is_significant else ['#4A5568']*7)
                     st.plotly_chart(fig_w, use_container_width=True)
 
                 with c2:
-                    fig_y = px.line(df, x="Date", y="Yearly_Effect", title="Annual Seasonality Wave",
-                                    line_shape='spline', color_discrete_sequence=['#FFCC00'])
-                    st.plotly_chart(fig_y, use_container_width=True)
+                    # Monthly seasonality (day of month 1-31)
+                    df['DayOfMonth'] = df['Date'].dt.day
+                    monthly_profile = df.groupby('DayOfMonth')['Monthly_Effect'].mean().reset_index()
+                    fig_m = px.line(monthly_profile, x='DayOfMonth', y='Monthly_Effect', title="Monthly Pay-Cycle Pattern")
+                    st.plotly_chart(fig_m, use_container_width=True)
 
         st.divider()
 
@@ -184,16 +183,16 @@ if uploaded_file:
             risk_gap = max_val - sl_threshold
             
             r1, r2, r3, r4 = st.columns(4)
-            r1.metric(f"{int(target_sl*100)}% SL Stock", f"{int(sl_threshold)}")
-            r2.metric("Max Observed", f"{int(max_val)}")
+            r1.metric(f"{int(target_sl*100)}% SL Requirement", f"{int(sl_threshold)}")
+            r2.metric("Max Demand (Window)", f"{int(max_val)}")
             r3.metric("The Risk Gap", f"{int(risk_gap)}", delta="Uncovered Units", delta_color="inverse")
-            r4.metric("Risk Financials", f"${int(risk_gap * unit_val_input):,}")
+            r4.metric("Exposure Value", f"${int(risk_gap * unit_val_input):,}")
 
-            fig_risk = px.histogram(rolling_demand, nbins=20, title="Demand Probability Distribution")
+            fig_risk = px.histogram(rolling_demand, nbins=20, title="Windowed Demand Distribution")
             fig_risk.add_vline(x=sl_threshold, line_dash="dash", line_color="yellow", annotation_text="SL Target")
             fig_risk.add_vline(x=max_val, line_dash="dot", line_color="red", annotation_text="Max")
             fig_risk.add_vrect(x0=sl_threshold, x1=max_val, fillcolor="red", opacity=0.15, layer="below", line_width=0, annotation_text="RISK ZONE")
             st.plotly_chart(fig_risk, use_container_width=True)
 
 else:
-    st.info("👋 Upload your Excel to begin.")
+    st.info("👋 Dashboard ready. Please upload your Excel audit file to continue.")
