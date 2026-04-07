@@ -7,9 +7,9 @@ from prophet import Prophet
 import io
 
 # ------------------------------------------------
-# 1. Page Config & Logic
+# 1. Page Config & Core Logic
 # ------------------------------------------------
-st.set_page_config(layout="wide", page_title="AI Stratified Auditor")
+st.set_page_config(layout="wide", page_title="AI Stratified Auditor Pro")
 
 def run_full_audit(df, lt, u_val, h_pct, o_cost):
     df.columns = [c.strip().title() for c in df.columns]
@@ -38,11 +38,9 @@ def run_prophet_stratification_smoothed(df):
     m.fit(m_df)
     forecast = m.predict(m_df)
     
-    # Extract components
     df['Trend'] = forecast['trend']
     df['Raw_Seasonal'] = forecast['additive_terms']
-    
-    # 14-day Smoothing for Zone Classification
+    # 14-day smoothing to create stable "Zones"
     df['Smoothed_Seasonal'] = df['Raw_Seasonal'].rolling(window=14, center=True).mean().ffill().bfill()
     
     high_v = df['Smoothed_Seasonal'].quantile(0.85)
@@ -73,10 +71,9 @@ if uploaded_file:
     raw_data = pd.read_excel(uploaded_file)
     df = run_full_audit(raw_data, lt_manual, unit_val, holding_pct, order_cost)
     
-    t1, t2 = st.tabs(["📊 Inventory Performance", "🕵️ Demand Stratification"])
+    t1, t2 = st.tabs(["📊 Performance Audit", "🕵️ Demand DNA & Risk"])
 
     with t1:
-        # Standard Performance Metrics
         total_d = df['Demand'].sum()
         fill_rate = (1 - (df['Shortage'].sum() / total_d)) * 100 if total_d > 0 else 100
         k1, k2, k3, k4 = st.columns(4)
@@ -92,51 +89,66 @@ if uploaded_file:
         st.plotly_chart(fig, use_container_width=True)
 
     with t2:
-        st.header("🕵️ Demand Stratification & Trend Analysis")
+        st.header("🕵️ Demand DNA & Stratification")
         
-        if st.button("🚀 Run AI Analysis"):
-            with st.spinner("Decoding DNA & extracting trend..."):
-                df = run_prophet_stratification_smoothed(df)
-                
-                # --- TREND & DEMAND GRAPH ---
-                st.subheader("Historical Demand & AI Trend Line")
-                show_trend = st.checkbox("🔍 Overlay Underlying Trend Line", value=True)
-                
-                fig_demand = px.scatter(df, x='Date', y='Demand', color='Zone',
-                                        color_discrete_map={"Peak Season": "#F56565", "Normal Season": "#63B3ED", "Low Season": "#4FD1C5"},
-                                        title="Demand Distribution with Seasonal Zones")
-                
-                if show_trend:
-                    fig_demand.add_trace(go.Scatter(x=df['Date'], y=df['Trend'], 
-                                                   mode='lines', name='Growth Trend', 
-                                                   line=dict(color='#FFA500', width=3, dash='dash')))
-                
-                # Connect the dots with a faint line
-                fig_demand.add_trace(go.Scatter(x=df['Date'], y=df['Demand'], 
-                                               line=dict(color='rgba(255,255,255,0.2)', width=1), 
-                                               showlegend=False))
-                
-                fig_demand.update_layout(template="plotly_dark", height=450)
-                st.plotly_chart(fig_demand, use_container_width=True)
+        if st.button("🚀 Run AI Stratification"):
+            df = run_prophet_stratification_smoothed(df)
+            st.session_state['stratified_df'] = df
 
-                # --- THE STRATIFIED TABLE ---
-                st.subheader("📋 Segmented Demand Log")
-                st.dataframe(df[["Date", "Demand", "Zone"]], use_container_width=True, height=350)
+        if 'stratified_df' in st.session_state:
+            df = st.session_state['stratified_df']
 
-                # --- HISTOGRAM & SAFETY STOCK ---
-                st.divider()
-                st.subheader("📊 Probability & Strategy")
-                c_hist, c_stats = st.columns([2, 1])
+            # --- 1. TREND & ZONE GRAPH ---
+            st.subheader("Daily Demand, Zones & AI Trend")
+            fig_demand = px.scatter(df, x='Date', y='Demand', color='Zone',
+                                    color_discrete_map={"Peak Season": "#F56565", "Normal Season": "#63B3ED", "Low Season": "#4FD1C5"})
+            fig_demand.add_trace(go.Scatter(x=df['Date'], y=df['Trend'], mode='lines', name='Growth Trend', line=dict(color='#FFA500', width=2, dash='dot')))
+            fig_demand.update_layout(template="plotly_dark", height=400)
+            st.plotly_chart(fig_demand, use_container_width=True)
+
+            # --- 2. RISK CONTROLS (THE SLIDERS) ---
+            st.divider()
+            st.subheader("🛡️ Risk & Safety Stock Simulation")
+            r_col1, r_col2 = st.columns(2)
+            with r_col1:
+                analysis_window = st.slider("Lead Time Window (Days)", 1, 30, lt_manual, help="Calculates rolling demand sum for this period.")
+            with r_col2:
+                target_sl = st.slider("Target Service Level (%)", 80, 99, 95) / 100
+
+            # Calculation for Rolling Window
+            df['Rolling_Demand'] = df['Demand'].rolling(window=analysis_window).sum()
+            
+            # --- 3. ROLLING WINDOW GRAPH ---
+            st.subheader(f"Total Demand over {analysis_window}-Day Windows")
+            fig_roll = px.line(df, x='Date', y='Rolling_Demand', title=f"Rolling Sum of Demand ({analysis_window} Days)", color_discrete_sequence=['#00FFCC'])
+            st.plotly_chart(fig_roll, use_container_width=True)
+
+            # --- 4. PROBABILITY & STATS ---
+            c_hist, c_stats = st.columns([2, 1])
+            with c_hist:
+                # Use the rolling data for the histogram to show lead-time risk
+                fig_hist = px.histogram(df.dropna(subset=['Rolling_Demand']), x="Rolling_Demand", color="Zone", 
+                                        barmode='overlay', opacity=0.6, title="Probability Distribution of Lead-Time Demand",
+                                        color_discrete_map={"Peak Season": "#F56565", "Normal Season": "#63B3ED", "Low Season": "#4FD1C5"})
+                st.plotly_chart(fig_hist, use_container_width=True)
+            
+            with c_stats:
+                # Stats based on the user-defined Service Level
+                from scipy.stats import norm
+                z_score = norm.ppf(target_sl)
                 
-                with c_hist:
-                    fig_hist = px.histogram(df, x="Demand", color="Zone", barmode='overlay', opacity=0.7,
-                                            color_discrete_map={"Peak Season": "#F56565", "Normal Season": "#63B3ED", "Low Season": "#4FD1C5"})
-                    st.plotly_chart(fig_hist, use_container_width=True)
+                zone_stats = df.dropna(subset=['Rolling_Demand']).groupby('Zone').agg({'Rolling_Demand': ['mean', 'std']}).reset_index()
+                zone_stats.columns = ['Zone', 'Avg Window Demand', 'Volatility (StdDev)']
                 
-                with c_stats:
-                    zone_stats = df.groupby('Zone').agg({'Demand': ['mean', 'std']}).reset_index()
-                    zone_stats.columns = ['Zone', 'Avg', 'Volatility']
-                    zone_stats['Safety Stock'] = (1.65 * zone_stats['Volatility'] * np.sqrt(lt_manual)).round(0)
-                    st.table(zone_stats)
+                # Safety Stock = Z * StdDev
+                zone_stats['Rec. Safety Stock'] = (z_score * zone_stats['Volatility (StdDev)']).round(0)
+                zone_stats['Reorder Point (ROP)'] = (zone_stats['Avg Window Demand'] + zone_stats['Rec. Safety Stock']).round(0)
+                
+                st.write(f"**Strategy at {target_sl*100:.0f}% Service Level:**")
+                st.table(zone_stats)
+
+            st.subheader("📋 Detailed Audit Log")
+            st.dataframe(df[["Date", "Demand", "Rolling_Demand", "Zone"]], use_container_width=True)
+
 else:
     st.info("Upload your Excel audit file to begin.")
