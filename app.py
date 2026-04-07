@@ -15,132 +15,150 @@ st.markdown(
     <style>
     .block-container { padding: 2rem 5rem; }
     [data-testid="stMetricValue"] { font-size: 1.8rem !important; }
-    section[data-testid="stSidebar"] .stButton button {
-        background-color: #2E7D32 !important; color: white !important; width: 100% !important;
-    }
+    [data-testid="stMetricLabel"] { font-size: 0.9rem !important; font-weight: bold !important; }
     </style>
     """,
     unsafe_allow_html=True
 )
 
 # ------------------------------------------------
-# 2. Sidebar Inputs
+# 2. Sidebar & Global Settings
 # ------------------------------------------------
 st.sidebar.header("📁 Data Upload")
 uploaded_file = st.sidebar.file_uploader("Upload Participant Excel", type=["xlsx"])
 
 st.sidebar.divider()
-st.sidebar.header("Audit Parameters")
+st.sidebar.header("Financial & Policy Params")
 unit_value = st.sidebar.number_input("Value Per Unit ($)", value=100)
 holding_cost_pct = st.sidebar.number_input("Annual Holding Cost %", value=20.0)
 ordering_cost = st.sidebar.number_input("Cost Per Order ($)", value=500)
 lead_time_manual = st.sidebar.number_input("Standard Lead Time (Days)", value=3, step=1)
 
 # ------------------------------------------------
-# 3. Data Processing Engine
+# 3. Audit Engine (Restoring Advanced Logic)
 # ------------------------------------------------
-def process_audit(df, lt, u_val, h_pct, o_cost):
-    # Standardize Column Names (Handling case sensitivity)
+def run_full_audit(df, lt, u_val, h_pct, o_cost):
+    # Normalize Columns
     df.columns = [c.strip().title() for c in df.columns]
-    
-    # Fill missing columns
+    df['Date'] = pd.to_datetime(df['Date'])
+    df = df.sort_values('Date')
+
+    # Ensure Order Placed exists (Back-calculation logic)
     if "Order Placed" not in df.columns:
-        # Back-calculate: If received on Day 5 with LT 3, placed on Day 2
         df["Order Placed"] = df["Order Received"].shift(-lt).fillna(0)
     
-    # Calculate Service Metrics
-    df['Shortage'] = np.maximum(0, df['Demand'] - (df['Opening Balance'] + df['Order Received']))
-    df['IsStockout'] = df['Shortage'] > 0
-    
-    # Calculate Costs
+    # Financials
     daily_h_rate = (h_pct / 100) / 365
     df['HoldingCost'] = df['Closing Balance'] * u_val * daily_h_rate
     df['OrderingCost'] = np.where(df['Order Placed'] > 0, o_cost, 0)
     
-    # Identify Lead Time Windows (Shading Logic)
-    # A day is "In Lead Time" if an order has been placed but not yet fully received
+    # Service Metrics
+    df['Shortage'] = np.maximum(0, df['Demand'] - (df['Opening Balance'] + df['Order Received']))
+    df['IsStockout'] = df['Shortage'] > 0
+    
+    # Lead Time Window Logic (for shading)
     df['InLT'] = False
-    for idx, row in df.iterrows():
-        if row['Order Placed'] > 0:
-            df.loc[idx : idx + lt - 1, 'InLT'] = True
-            
+    for idx in df[df['Order Placed'] > 0].index:
+        df.loc[idx : idx + lt - 1, 'InLT'] = True
+
+    # Seasonality Classification (Peak/Normal/Low)
+    avg_d = df['Demand'].mean()
+    std_d = df['Demand'].std()
+    conditions = [(df['Demand'] > (avg_d + std_d)), (df['Demand'] < (avg_d - std_d))]
+    df['Seasonality'] = np.select(conditions, ['Peak', 'Low'], default='Normal')
+    
     return df
 
 # ------------------------------------------------
-# 4. Main App Logic
+# 4. UI Tabs
 # ------------------------------------------------
 if uploaded_file:
-    raw_df = pd.read_excel(uploaded_file)
-    df = process_audit(raw_df, lead_time_manual, unit_value, holding_cost_pct, ordering_cost)
+    df = run_full_audit(pd.read_excel(uploaded_file), lead_time_manual, unit_value, holding_cost_pct, ordering_cost)
     
-    # --- Tabs Integration ---
-    t1, t2 = st.tabs(["📊 Performance Audit", "📈 Risk & Window Analysis"])
+    t1, t2 = st.tabs(["📊 Performance Audit", "📈 Demand Analyzer"])
 
     with t1:
-        # KPI Row
-        avg_demand = df['Demand'].mean()
-        total_demand = df['Demand'].sum()
-        fill_rate = (1 - (df['Shortage'].sum() / total_demand)) * 100 if total_demand > 0 else 100
+        # Row 1: Operational KPIs
+        total_d = df['Demand'].sum()
+        fill_rate = (1 - (df['Shortage'].sum() / total_d)) * 100 if total_d > 0 else 100
         
-        k1, k2, k3, k4 = st.columns(4)
+        k1, k2, k3, k4, k5 = st.columns(5)
         k1.metric("Stockout Days", int(df['IsStockout'].sum()))
-        k2.metric("Actual Fill Rate", f"{fill_rate:.1f}%")
+        k2.metric("Fill Rate", f"{fill_rate:.1f}%")
         k3.metric("Avg Inventory", f"{df['Closing Balance'].mean():.1f}")
-        k4.metric("Total Policy Cost", f"${(df['HoldingCost'].sum() + df['OrderingCost'].sum()):,.0f}")
+        k4.metric("Avg WC", f"${(df['Closing Balance'].mean() * u_val):,.0f}")
+        k5.metric("Total Cost", f"${(df['HoldingCost'].sum() + df['OrderingCost'].sum()):,.0f}")
 
-        # EOQ Comparison Expander
-        with st.expander("💰 EOQ Benchmarking", expanded=False):
-            annual_d = avg_demand * 365
-            annual_h = unit_value * (holding_cost_pct / 100)
-            eoq_val = np.sqrt((2 * annual_d * ordering_cost) / annual_h)
-            st.write(f"Based on this data, your **Economic Order Quantity (EOQ)** should be: **{int(eoq_val)} units**.")
-            st.info("Compare this to the average 'Order Placed' quantity in your file.")
+        # EOQ Section
+        with st.expander("🕵️ EOQ Strategy Benchmark"):
+            annual_d = df['Demand'].mean() * 365
+            annual_h = u_val * (holding_cost_pct / 100)
+            eoq = np.sqrt((2 * annual_d * o_cost) / annual_h)
+            st.write(f"Based on your data, your **Economic Order Quantity (EOQ)** is **{int(eoq)} units**.")
 
-        # Main Chart with Shading and Markers
-        st.subheader("Inventory Flow & Lead Time Windows")
+        # Main Plotly Chart (Restored Markers & Shading)
+        st.subheader("Inventory Levels & Lead Time Windows")
         fig = go.Figure()
         
-        # Lead Time Shading
-        fig.add_trace(go.Scatter(
-            x=df["Date"], 
-            y=np.where(df["InLT"], df["Closing Balance"].max(), np.nan),
-            fill='tozeroy', fillcolor='rgba(255, 0, 0, 0.05)', 
-            line=dict(width=0), name="Lead Time Window", showlegend=True
-        ))
-
-        # Balance Line
-        fig.add_trace(go.Scatter(x=df["Date"], y=df["Closing Balance"], name="Closing Stock", line=dict(color='#00CCFF', width=2)))
+        # Shading
+        fig.add_trace(go.Scatter(x=df["Date"], y=np.where(df["InLT"], df["Closing Balance"].max(), np.nan),
+            fill='tozeroy', fillcolor='rgba(255, 0, 0, 0.05)', line=dict(width=0), name="LT Window", showlegend=False))
         
-        # Event Markers
+        # Lines
+        fig.add_trace(go.Scatter(x=df["Date"], y=df["Closing Balance"], name="Physical Stock", line=dict(color='#00CCFF', width=2.5)))
+        
+        # Markers
         placed = df[df["Order Placed"] > 0]
-        fig.add_trace(go.Scatter(x=placed["Date"], y=placed["Closing Balance"], mode="markers", 
-                                 name="Order Placed", marker=dict(color="#00FF00", size=10, symbol="triangle-up")))
+        if not placed.empty:
+            fig.add_trace(go.Scatter(x=placed["Date"], y=placed["Closing Balance"], mode="markers", name="Order Placed", 
+                                     marker=dict(color="#00FF00", size=10, symbol="triangle-up")))
         
-        shorts = df[df["IsStockout"]]
-        fig.add_trace(go.Scatter(x=shorts["Date"], y=shorts["Closing Balance"], mode="markers", 
-                                 name="Stockout Event", marker=dict(color="red", size=10, symbol="x")))
-
         fig.update_layout(template="plotly_dark", height=450, hovermode="x unified")
         st.plotly_chart(fig, use_container_width=True)
 
         st.subheader("Audit Log")
-        st.dataframe(df, use_container_width=True)
+        st.dataframe(df, use_container_width=True, hide_index=True)
 
     with t2:
-        st.subheader("Risk & Distribution Analysis")
-        window_size = st.slider("Analysis Window (Days)", 1, 30, 5)
+        st.header("📈 Demand Analyzer")
+        
+        # Seasonality Breakdown
+        st.subheader("Seasonality Classification")
+        c1, c2 = st.columns([1, 2])
+        with c1:
+            st.write("**Classification Counts**")
+            st.table(df['Seasonality'].value_counts())
+        with c2:
+            fig_s = px.scatter(df, x="Date", y="Demand", color="Seasonality", 
+                               color_discrete_map={"Peak": "#F56565", "Normal": "#63B3ED", "Low": "#4FD1C5"})
+            fig_s.update_layout(template="plotly_dark", height=300)
+            st.plotly_chart(fig_s, use_container_width=True)
+
+        st.divider()
+        
+        # Risk & Window Analysis (Restoring the "Risk Gap" logic)
+        st.subheader("Risk & Service Level Analysis")
+        window_size = st.slider("Select Analysis Window (Days)", 1, 30, 7)
         rolling_demand = df['Demand'].rolling(window=window_size).sum().dropna()
         
         if not rolling_demand.empty:
             target_sl = st.slider("Target Service Level", 0.80, 0.99, 0.95)
-            cutoff = np.percentile(rolling_demand, target_sl * 100)
+            sl_threshold = np.percentile(rolling_demand, target_sl * 100)
+            max_val = rolling_demand.max()
+            risk_gap = max_val - sl_threshold
             
-            fig_risk = px.histogram(rolling_demand, nbins=20, title="Demand Volatility Window", color_discrete_sequence=['#00CC96'])
-            fig_risk.add_vline(x=cutoff, line_dash="dash", line_color="yellow", annotation_text="Target SL")
-            fig_risk.update_layout(template="plotly_dark")
+            r1, r2, r3 = st.columns(3)
+            r1.metric(f"{int(target_sl*100)}% SL Requirement", f"{int(sl_threshold)} Units")
+            r2.metric("Maximum Observed Demand", f"{int(max_val)} Units")
+            r3.metric("The Risk Gap", f"{int(risk_gap)} Units", delta="Uncovered", delta_color="inverse")
+
+            fig_risk = px.histogram(rolling_demand, nbins=20, title="Demand Probability Distribution", color_discrete_sequence=['#718096'])
+            fig_risk.add_vline(x=sl_threshold, line_dash="dash", line_color="yellow", annotation_text="SL Target")
+            fig_risk.add_vline(x=max_val, line_dash="dot", line_color="red", annotation_text="Absolute Max")
+            fig_risk.add_vrect(x0=sl_threshold, x1=max_val, fillcolor="red", opacity=0.15, layer="below", line_width=0, annotation_text="RISK ZONE")
+            
+            fig_risk.update_layout(template="plotly_dark", height=400)
             st.plotly_chart(fig_risk, use_container_width=True)
-            
-            st.metric("Required Safety Stock for Window", f"{int(cutoff)} Units")
+
 else:
-    st.info("👋 Welcome! Please upload your Excel file to begin the audit.")
-    st.write("Required columns: **Date, Opening Balance, Demand, Order Received, Closing Balance**")
+    st.info("👋 Upload your inventory Excel file to begin the audit. Ensure columns: Date, Opening Balance, Demand, Order Received, Closing Balance.")
