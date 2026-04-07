@@ -4,10 +4,11 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from prophet import Prophet
+from scipy.stats import norm
 import io
 
 # ------------------------------------------------
-# 1. Page Config & Core Logic
+# 1. Page Config & Logic
 # ------------------------------------------------
 st.set_page_config(layout="wide", page_title="AI Stratified Auditor Pro")
 
@@ -40,7 +41,6 @@ def run_prophet_stratification_smoothed(df):
     
     df['Trend'] = forecast['trend']
     df['Raw_Seasonal'] = forecast['additive_terms']
-    # 14-day smoothing to create stable "Zones"
     df['Smoothed_Seasonal'] = df['Raw_Seasonal'].rolling(window=14, center=True).mean().ffill().bfill()
     
     high_v = df['Smoothed_Seasonal'].quantile(0.85)
@@ -74,6 +74,7 @@ if uploaded_file:
     t1, t2 = st.tabs(["📊 Performance Audit", "🕵️ Demand DNA & Risk"])
 
     with t1:
+        # Standard Performance Metrics
         total_d = df['Demand'].sum()
         fill_rate = (1 - (df['Shortage'].sum() / total_d)) * 100 if total_d > 0 else 100
         k1, k2, k3, k4 = st.columns(4)
@@ -106,12 +107,12 @@ if uploaded_file:
             fig_demand.update_layout(template="plotly_dark", height=400)
             st.plotly_chart(fig_demand, use_container_width=True)
 
-            # --- 2. RISK CONTROLS (THE SLIDERS) ---
+            # --- 2. RISK CONTROLS ---
             st.divider()
             st.subheader("🛡️ Risk & Safety Stock Simulation")
             r_col1, r_col2 = st.columns(2)
             with r_col1:
-                analysis_window = st.slider("Lead Time Window (Days)", 1, 30, lt_manual, help="Calculates rolling demand sum for this period.")
+                analysis_window = st.slider("Lead Time Window (Days)", 1, 30, lt_manual)
             with r_col2:
                 target_sl = st.slider("Target Service Level (%)", 80, 99, 95) / 100
 
@@ -123,32 +124,38 @@ if uploaded_file:
             fig_roll = px.line(df, x='Date', y='Rolling_Demand', title=f"Rolling Sum of Demand ({analysis_window} Days)", color_discrete_sequence=['#00FFCC'])
             st.plotly_chart(fig_roll, use_container_width=True)
 
-            # --- 4. PROBABILITY & STATS ---
-            c_hist, c_stats = st.columns([2, 1])
-            with c_hist:
-                # Use the rolling data for the histogram to show lead-time risk
-                fig_hist = px.histogram(df.dropna(subset=['Rolling_Demand']), x="Rolling_Demand", color="Zone", 
-                                        barmode='overlay', opacity=0.6, title="Probability Distribution of Lead-Time Demand",
-                                        color_discrete_map={"Peak Season": "#F56565", "Normal Season": "#63B3ED", "Low Season": "#4FD1C5"})
-                st.plotly_chart(fig_hist, use_container_width=True)
+            # --- 4. THE STRATEGY TABLE (Relocated Below Graph) ---
+            st.write("### 🛡️ Tailored Strategy by Seasonal Zone")
+            z_score = norm.ppf(target_sl)
             
-            with c_stats:
-                # Stats based on the user-defined Service Level
-                from scipy.stats import norm
-                z_score = norm.ppf(target_sl)
-                
-                zone_stats = df.dropna(subset=['Rolling_Demand']).groupby('Zone').agg({'Rolling_Demand': ['mean', 'std']}).reset_index()
-                zone_stats.columns = ['Zone', 'Avg Window Demand', 'Volatility (StdDev)']
-                
-                # Safety Stock = Z * StdDev
-                zone_stats['Rec. Safety Stock'] = (z_score * zone_stats['Volatility (StdDev)']).round(0)
-                zone_stats['Reorder Point (ROP)'] = (zone_stats['Avg Window Demand'] + zone_stats['Rec. Safety Stock']).round(0)
-                
-                st.write(f"**Strategy at {target_sl*100:.0f}% Service Level:**")
-                st.table(zone_stats)
+            # Aggregating Rolling Stats
+            zone_stats = df.dropna(subset=['Rolling_Demand']).groupby('Zone').agg({
+                'Rolling_Demand': ['mean', 'std', 'max']
+            }).reset_index()
+            zone_stats.columns = ['Zone', 'Avg Window Demand', 'Volatility (StdDev)', 'Absolute Max']
+            
+            # Calculate ROP and Risk Gap
+            zone_stats['Rec. Safety Stock'] = (z_score * zone_stats['Volatility (StdDev)']).round(0)
+            zone_stats['Reorder Point (ROP)'] = (zone_stats['Avg Window Demand'] + zone_stats['Rec. Safety Stock']).round(0)
+            zone_stats['The Risk Gap'] = (zone_stats['Absolute Max'] - zone_stats['Reorder Point (ROP)']).round(0)
+            
+            # Formatting for display
+            display_table = zone_stats[['Zone', 'Avg Window Demand', 'Volatility (StdDev)', 'Reorder Point (ROP)', 'Absolute Max', 'The Risk Gap']]
+            st.table(display_table)
+            
+            st.info(f"💡 **Interpretation:** 'The Risk Gap' shows units unprotected at your {target_sl*100:.0f}% Service Level. During Peak Season, your ROP is {zone_stats.loc[zone_stats['Zone'] == 'Peak Season', 'Reorder Point (ROP)'].values[0]:.0f} units.")
 
-            st.subheader("📋 Detailed Audit Log")
-            st.dataframe(df[["Date", "Demand", "Rolling_Demand", "Zone"]], use_container_width=True)
+            # --- 5. PROBABILITY HISTOGRAM ---
+            st.divider()
+            st.subheader("📊 Probability Distribution of Window Demand")
+            fig_hist = px.histogram(df.dropna(subset=['Rolling_Demand']), x="Rolling_Demand", color="Zone", 
+                                    barmode='overlay', opacity=0.6,
+                                    color_discrete_map={"Peak Season": "#F56565", "Normal Season": "#63B3ED", "Low Season": "#4FD1C5"})
+            fig_hist.update_layout(template="plotly_dark")
+            st.plotly_chart(fig_hist, use_container_width=True)
+
+            with st.expander("📋 View Detailed Segmented Log"):
+                st.dataframe(df[["Date", "Demand", "Rolling_Demand", "Zone"]], use_container_width=True)
 
 else:
     st.info("Upload your Excel audit file to begin.")
