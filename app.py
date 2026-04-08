@@ -6,25 +6,35 @@ import plotly.graph_objects as go
 from prophet import Prophet
 from scipy.stats import norm
 
+# --- EXECUTIVE UI STYLING ---
 st.markdown(
     """
     <style>
-        /* Push sidebar content down and right */
+        /* Sidebar Zoom Buffer */
         [data-testid="stSidebarUserContent"] {
-            # padding-top: 100px;
-            padding-left: 50px;
-            # padding-right: 20px;
+            padding-top: 80px;
+            padding-left: 20px;
         }
         
-        /* Ensure the sidebar stays wide enough when zoomed */
-        [data-testid="stSidebar"] {
-            min-width: 350px;
-            max-width: 450px;
+        /* Main Title Styling */
+        .main-header {
+            font-size: 36px;
+            font-weight: 800;
+            color: #00FFCC;
+            margin-bottom: 0px;
+        }
+        .sub-header {
+            font-size: 18px;
+            color: #AAAAAA;
+            margin-bottom: 30px;
         }
     </style>
     """,
     unsafe_allow_html=True
 )
+
+st.markdown('<p class="main-header">AI Inventory Auditor Pro</p>', unsafe_allow_html=True)
+st.markdown('<p class="sub-header">Strategic Stress Test & Financial Comparative Analysis</p>', unsafe_allow_html=True)
 
 # ------------------------------------------------
 # 1. Page Config & Core Logic
