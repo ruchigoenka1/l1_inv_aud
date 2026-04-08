@@ -125,10 +125,8 @@ if uploaded_file:
                 with sc1: 
                     sel_zone = st.selectbox("Distribution Source", ["All Data"] + list(z_stats['Zone'].unique()))
                 
-                # Stat extraction
                 avg_d, std_d = (df_full['Demand'].mean(), df_full['Demand'].std()) if sel_zone == "All Data" else (df_full[df_full['Zone'] == sel_zone]['Demand'].mean(), df_full[df_full['Zone'] == sel_zone]['Demand'].std())
     
-                # EOQ Logic
                 annual_d_proj = avg_d * 365
                 var_h_unit = u_val * (h_pct / 100)
                 eoq_val = int(np.sqrt((2 * annual_d_proj * o_cost) / var_h_unit)) if var_h_unit > 0 else 0
@@ -166,9 +164,30 @@ if uploaded_file:
                     orders_placed.append(order_triggered); pipeline_history.append(pipeline_val)
                     total_inv_pos.append(inv_pos); stock = close_s
     
-                sdf = pd.DataFrame({"Day": range(sim_days), "Demand": sim_demands, "Physical_Stock": stocks, "Shortage": shortages, "OrderEvent": orders_placed, "Pipeline": pipeline_history, "Total_Inv": total_inv_pos})
+                sdf = pd.DataFrame({
+                    "Day": range(sim_days), "Demand": sim_demands, "Physical_Stock": stocks, 
+                    "Shortage": shortages, "OrderEvent": orders_placed, 
+                    "Pipeline": pipeline_history, "Total_Inventory": total_inv_pos
+                })
     
-                # --- 3. ANNUALIZED COMPARATIVE MATH ---
+                # --- 3. MOVEMENT GRAPH (Physical vs Total + ROP/Stockouts) ---
+                st.subheader("📈 Simulated Inventory Movement")
+                fig_mov = go.Figure()
+                # Total Inventory Position (Dashed Line)
+                fig_mov.add_trace(go.Scatter(x=sdf["Day"], y=sdf["Total_Inventory"], name="Total Inventory (On-Hand + On-Order)", line=dict(color="#FFD700", dash='dash')))
+                # Physical On-Hand (Filled Area)
+                fig_mov.add_trace(go.Scatter(x=sdf["Day"], y=sdf["Physical_Stock"], name="Physical Stock (On-Hand)", fill='tozeroy', line=dict(color="#00FFCC")))
+                # Reorder Point Line
+                fig_mov.add_hline(y=test_rop, line_dash="dot", line_color="orange", annotation_text=f"ROP: {test_rop}")
+                # Stockout Markers
+                stockouts = sdf[sdf['Shortage'] > 0]
+                if not stockouts.empty:
+                    fig_mov.add_trace(go.Scatter(x=stockouts["Day"], y=stockouts["Physical_Stock"], mode='markers', name="Stockout Event", marker=dict(color='red', size=8, symbol='x')))
+                
+                fig_mov.update_layout(template="plotly_dark", height=450, hovermode="x unified", yaxis_title="Units")
+                st.plotly_chart(fig_mov, use_container_width=True)
+    
+                # --- 4. ANNUALIZED COMPARATIVE MATH ---
                 orig_n_days = len(df_audited)
                 orig_annual_factor = 365 / orig_n_days
                 orig_avg_stock = df_audited['Closing Balance'].mean()
@@ -184,7 +203,7 @@ if uploaded_file:
                 sim_l = (sdf['Shortage'].sum() * sim_annual_factor) * u_val
                 sim_fr = (1 - (sdf['Shortage'].sum() / sdf['Demand'].sum())) * 100
     
-                # --- 4. FINANCIAL TABLE ---
+                # --- 5. FINANCIAL TABLE ---
                 st.subheader("💰 Annualized Comparative Financial Study")
                 metrics = [
                     ("Avg Inventory (Units)", orig_avg_stock, sim_avg_stock, "lower"),
@@ -204,20 +223,11 @@ if uploaded_file:
                                  "Simulated (Test)": f"${sim:,.0f}" if "$" in label else f"{sim:,.1f}", "% Difference": f":{color}[{diff:+.1f}%]"})
                 st.table(pd.DataFrame(rows))
     
-                # --- 5. UNIFIED VISUALS ---
-                st.subheader("🏦 Unified Working Capital Comparison ($ Value)")
-                min_days = min(len(df_audited), len(sdf))
-                fig_wc = go.Figure()
-                fig_wc.add_trace(go.Scatter(x=list(range(min_days)), y=(df_audited['Closing Balance']*u_val).iloc[:min_days], name="Historical (Blue)", fill='tozeroy', line=dict(color='rgba(99, 179, 237, 0.8)')))
-                fig_wc.add_trace(go.Scatter(x=list(range(min_days)), y=(sdf['Physical_Stock']*u_val).iloc[:min_days], name="Simulated (Orange)", fill='tozeroy', line=dict(color='rgba(255, 165, 0, 0.5)')))
-                st.plotly_chart(fig_wc, use_container_width=True)
-    
-                # --- 6. DATA TABLES (NEW) ---
+                # --- 6. VERTICAL DATA TABLES ---
                 st.divider()
-                c_d1, c_d2 = st.columns(2)
-                with c_d1:
-                    with st.expander("📋 View Audited Historical Data (Healed)"):
-                        st.dataframe(df_audited[['Date', 'Demand', 'Opening Balance', 'Order Received', 'Closing Balance', 'Shortage']], use_container_width=True)
-                with c_d2:
-                    with st.expander("📋 View Simulated Strategy Data"):
-                        st.dataframe(sdf, use_container_width=True)
+                st.subheader("📋 Detailed Data Logs")
+                with st.expander("📂 View Audited Historical Data (Healed)"):
+                    st.dataframe(df_audited[['Date', 'Demand', 'Opening Balance', 'Order Received', 'Closing Balance', 'Shortage']], use_container_width=True)
+                
+                with st.expander("📂 View Simulated Strategy Data"):
+                    st.dataframe(sdf, use_container_width=True)
