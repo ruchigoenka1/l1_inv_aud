@@ -109,7 +109,7 @@ if uploaded_file:
 
     with tab3:
         if 'zone_stats' not in st.session_state:
-            st.warning("Please run Tab 2 (Demand DNA) first.")
+            st.warning("Please run 'AI DNA Extraction' in Tab 2 first.")
         else:
             z_stats = st.session_state['zone_stats']
             df_full = st.session_state['dna_df']
@@ -121,57 +121,80 @@ if uploaded_file:
                     options = ["All Data"] + list(z_stats['Zone'].unique())
                     sel_zone = st.selectbox("Distribution Source", options)
                 
+                # Extract Demand Profile Stats
                 if sel_zone == "All Data":
                     avg_d, std_d = df_full['Demand'].mean(), df_full['Demand'].std()
                 else:
-                    avg_d, std_d = df_full[df_full['Zone'] == sel_zone]['Demand'].mean(), df_full[df_full['Zone'] == sel_zone]['Demand'].std()
+                    avg_d = df_full[df_full['Zone'] == sel_zone]['Demand'].mean()
+                    std_d = df_full[df_full['Zone'] == sel_zone]['Demand'].std()
     
-                # EOQ Calculation
+                # EOQ Calculation (Variable Logic:sqrt(2DS/H))
                 annual_d_proj = avg_d * 365
                 var_h_annual_unit = u_val * (h_pct / 100)
                 eoq_val = int(np.sqrt((2 * annual_d_proj * o_cost) / var_h_annual_unit)) if var_h_annual_unit > 0 else 0
     
-                with sc2: test_rop = st.number_input("Test ROP", value=int(avg_d * lt_manual * 1.2))
+                with sc2: 
+                    test_rop = st.number_input("Test Reorder Point (ROP)", value=int(avg_d * lt_manual * 1.2))
                 with sc3: 
                     use_eoq = st.checkbox("Use EOQ Quantity", value=False)
                     test_qty = st.number_input("Test Order Qty (Q)", value=eoq_val if use_eoq else int(test_rop * 1.5))
-                with sc4: sim_days = st.slider("Simulation Horizon (Days)", 30, 365, 365)
+                with sc4: 
+                    sim_days = st.slider("Simulation Horizon (Days)", 30, 365, 365)
     
             if st.button("▶️ Run Comparative Study"):
                 # --- 2. Simulation Logic ---
                 stocks, shortages, sim_demands, orders_placed, pipeline_history = [], [], [], [], []
-                stock = test_rop + (test_qty / 2) 
+                stock = test_rop + (test_qty / 2) # Starting assumption
                 p_orders = {}
     
                 for d in range(sim_days):
+                    # Demand Sync
                     daily_d = int(max(0, np.random.normal(avg_d, std_d)))
+                    
+                    # Arrivals
                     recv = p_orders.pop(d, 0)
                     open_s = stock + recv
+                    
+                    # Fulfillment
                     sales = min(open_s, daily_d)
                     shrt = int(daily_d - sales)
                     close_s = open_s - sales
                     
+                    # Correct Pipeline Tracking (Sum of orders in the air)
                     pipeline_val = sum(p_orders.values())
                     inv_pos = close_s + pipeline_val
                     
+                    # Reorder Logic (Only 1 order in pipeline allowed)
                     order_triggered = 0
                     if inv_pos <= test_rop and pipeline_val == 0:
                         p_orders[d + int(lt_manual)] = test_qty
                         order_triggered = 1
-                        pipeline_val = test_qty # Immediate update for graph
+                        pipeline_val = test_qty # Update for current day visual
                     
-                    stocks.append(close_s); shortages.append(shrt); sim_demands.append(daily_d)
-                    orders_placed.append(order_triggered); pipeline_history.append(pipeline_val)
+                    stocks.append(close_s)
+                    shortages.append(shrt)
+                    sim_demands.append(daily_d)
+                    orders_placed.append(order_triggered)
+                    pipeline_history.append(pipeline_val)
                     stock = close_s
     
-                sdf = pd.DataFrame({"Day": range(sim_days), "Demand": sim_demands, "Stock": stocks, "Shortage": shortages, "OrderEvent": orders_placed, "Pipeline": pipeline_history})
+                sdf = pd.DataFrame({
+                    "Day": range(sim_days), 
+                    "Demand": sim_demands, 
+                    "Stock": stocks, 
+                    "Shortage": shortages, 
+                    "OrderEvent": orders_placed, 
+                    "Pipeline": pipeline_history
+                })
     
-                # --- 3. ANNUALIZED COMPARATIVE MATH ---
+                # --- 3. ANNUALIZED COMPARATIVE MATH (Apples-to-Apples) ---
+                
                 # Case A: Original (Audit)
                 orig_n_days = len(df_audited)
                 orig_annual_factor = 365 / orig_n_days
                 orig_avg_stock = df_audited['Closing Balance'].mean()
                 orig_avg_wc = orig_avg_stock * u_val
+                
                 orig_h_annual = (orig_avg_wc * (h_pct/100)) + fixed_wh_cost
                 orig_o_annual = (df_audited['Order Received'].astype(bool).sum() * orig_annual_factor) * o_cost
                 orig_l_annual = (df_audited['Shortage'].sum() * orig_annual_factor) * u_val
@@ -181,12 +204,13 @@ if uploaded_file:
                 sim_annual_factor = 365 / sim_days
                 sim_avg_stock = sdf['Stock'].mean()
                 sim_avg_wc = sim_avg_stock * u_val
+                
                 sim_h_annual = (sim_avg_stock * u_val * (h_pct/100)) + fixed_wh_cost
                 sim_o_annual = (sdf['OrderEvent'].sum() * sim_annual_factor) * o_cost
                 sim_l_annual = (sdf['Shortage'].sum() * sim_annual_factor) * u_val
                 sim_fr = (1 - (sdf['Shortage'].sum() / sdf['Demand'].sum())) * 100
     
-                # --- 4. COMPARATIVE TABLE WITH COLOR-CODED DELTA ---
+                # --- 4. COMPARATIVE TABLE ---
                 st.subheader("💰 Annualized Comparative Financial Study")
                 
                 metrics = [
@@ -202,38 +226,45 @@ if uploaded_file:
                 rows = []
                 for label, orig, sim, direction in metrics:
                     diff = ((sim - orig) / orig * 100) if orig != 0 else 0
-                    # Color logic
                     if direction == "lower":
                         color = "green" if sim <= orig else "red"
                     else:
                         color = "green" if sim >= orig else "red"
                     
-                    diff_str = f":{color}[{diff:+.1f}%]"
                     rows.append({
                         "Metric": label,
-                        "Original (Audit)": f"{orig:,.1f}" if "$" not in label else f"${orig:,.0f}",
-                        "Simulated (Test)": f"{sim:,.1f}" if "$" not in label else f"${sim:,.0f}",
-                        "% Difference": diff_str
+                        "Original (Audit)": f"{orig:,.1f}" if "%" in label else f"${orig:,.0f}",
+                        "Simulated (Test)": f"{sim:,.1f}" if "%" in label else f"${sim:,.0f}",
+                        "% Difference": f":{color}[{diff:+.1f}%]"
                     })
     
                 st.table(pd.DataFrame(rows))
     
-                # --- 5. VISUALS (Pipeline & WC Maps) ---
+                # --- 5. VISUALS ---
                 st.subheader("🚠 Stock & Pipeline Analysis (Lead-Time Sync)")
                 fig_p = go.Figure()
-                fig_p.add_trace(go.Scatter(x=sdf["Day"], y=sdf["Pipeline"], name="Pipeline (On-Order)", line=dict(color="#FF00FF", dash='dot'), step='post'))
-                fig_p.add_trace(go.Scatter(x=sdf["Day"], y=sdf["Stock"], name="Physical Stock (On-Hand)", fill='tozeroy', line=dict(color="#00FFCC")))
+                # Pipeline Position (Step Line)
+                fig_p.add_trace(go.Scatter(x=sdf["Day"], y=sdf["Pipeline"], name="Pipeline (On-Order)", 
+                                         line=dict(color="#FF00FF", width=2, dash='dot', shape='hv')))
+                # Physical Stock
+                fig_p.add_trace(go.Scatter(x=sdf["Day"], y=sdf["Stock"], name="Physical Stock (On-Hand)", 
+                                         fill='tozeroy', line=dict(color="#00FFCC", width=3), fillcolor='rgba(0, 255, 204, 0.1)'))
+                # ROP Line
                 fig_p.add_hline(y=test_rop, line_dash="dash", line_color="orange", annotation_text=f"ROP: {test_rop}")
+                
                 fig_p.update_layout(template="plotly_dark", height=450, hovermode="x unified")
                 st.plotly_chart(fig_p, use_container_width=True)
     
                 st.subheader("🏦 Working Capital Map ($ Value)")
                 c1, c2 = st.columns(2)
                 with c1:
-                    st.write("**Historical Audit (Blue)**")
+                    st.write("**Historical Audit Case (Blue)**")
                     st.plotly_chart(px.area(df_audited, x="Date", y=df_audited["Closing Balance"]*u_val, color_discrete_sequence=['#63B3ED']), use_container_width=True)
                 with c2:
-                    st.write("**Simulated Policy (Orange)**")
+                    st.write("**Simulated Strategy Case (Orange)**")
                     st.plotly_chart(px.area(sdf, x="Day", y=sdf["Stock"]*u_val, color_discrete_sequence=['#FFA500']), use_container_width=True)
+    
+                with st.expander("📋 View Simulation Log Data"):
+                    st.dataframe(sdf, use_container_width=True)
 else:
     st.info("👋 Upload historical Excel file to begin.")
