@@ -127,7 +127,6 @@ if uploaded_file:
                     avg_d = df_full[df_full['Zone'] == sel_zone]['Demand'].mean()
                     std_d = df_full[df_full['Zone'] == sel_zone]['Demand'].std()
     
-                # EOQ calculation (Variable Only)
                 annual_d_proj = avg_d * 365
                 var_h_annual_unit = u_val * (h_pct / 100)
                 eoq_val = int(np.sqrt((2 * annual_d_proj * o_cost) / var_h_annual_unit)) if var_h_annual_unit > 0 else 0
@@ -153,23 +152,29 @@ if uploaded_file:
                     close_s = open_s - sales
                     
                     pipeline_val = sum(p_orders.values())
+                    inv_pos = close_s + pipeline_val
                     
                     order_triggered = 0
-                    if (close_s + pipeline_val) <= test_rop and pipeline_val == 0:
+                    if inv_pos <= test_rop and pipeline_val == 0:
                         p_orders[d + int(lt_manual)] = test_qty
                         order_triggered = 1
                         pipeline_val = test_qty 
                     
                     stocks.append(close_s); shortages.append(shrt); sim_demands.append(daily_d)
                     orders_placed.append(order_triggered); pipeline_history.append(pipeline_val)
-                    total_inv_pos.append(close_s + pipeline_val); stock = close_s
+                    total_inv_pos.append(inv_pos); stock = close_s
     
                 sdf = pd.DataFrame({
-                    "Day": range(sim_days), "Physical": stocks, "Shortage": shortages, 
-                    "OrderEvent": orders_placed, "Pipeline": pipeline_history, "Total_Inv": total_inv_pos
+                    "Day": range(sim_days), 
+                    "Demand": sim_demands, # Standardized Column Name
+                    "Physical": stocks, 
+                    "Shortage": shortages, 
+                    "OrderEvent": orders_placed, 
+                    "Pipeline": pipeline_history, 
+                    "Total_Inv": total_inv_pos
                 })
     
-                # --- 3. ANNUALIZED COMPARATIVE TABLE ---
+                # --- 3. ANNUALIZED COMPARATIVE MATH ---
                 orig_n_days = len(df_audited)
                 orig_annual_factor = 365 / orig_n_days
                 orig_avg_stock = df_audited['Closing Balance'].mean()
@@ -187,7 +192,8 @@ if uploaded_file:
                 sim_l_annual = (sdf['Shortage'].sum() * sim_annual_factor) * u_val
                 sim_fr = (1 - (sdf['Shortage'].sum() / sdf['Demand'].sum())) * 100
     
-                st.subheader("💰 Annualized Strategy Comparison")
+                # --- 4. TABLE DISPLAY ---
+                st.subheader("💰 Annualized Comparative Financial Study")
                 metrics = [
                     ("Avg Inventory (Units)", orig_avg_stock, sim_avg_stock, "lower"),
                     ("Avg Working Capital ($)", orig_avg_wc, sim_avg_wc, "lower"),
@@ -205,35 +211,17 @@ if uploaded_file:
                                  "Simulated (Test)": f"${sim:,.0f}" if "$" in label else f"{sim:,.1f}", "% Difference": f":{color}[{diff:+.1f}%]"})
                 st.table(pd.DataFrame(rows))
     
-                # --- 4. UNIFIED WORKING CAPITAL MAP ---
+                # --- 5. UNIFIED WORKING CAPITAL MAP ---
                 st.subheader("🏦 Unified Working Capital Comparison ($ Value)")
                 min_days = min(len(df_audited), len(sdf))
-                
                 fig_wc = go.Figure()
-                # Historical Case (Blue)
-                fig_wc.add_trace(go.Scatter(
-                    x=list(range(min_days)), 
-                    y=(df_audited['Closing Balance'] * u_val).iloc[:min_days], 
-                    name="Historical Case", 
-                    fill='tozeroy', 
-                    line=dict(color='rgba(99, 179, 237, 0.8)', width=2),
-                    fillcolor='rgba(99, 179, 237, 0.2)'
-                ))
-                # Simulated Policy (Orange)
-                fig_wc.add_trace(go.Scatter(
-                    x=list(range(min_days)), 
-                    y=(sdf['Physical'] * u_val).iloc[:min_days], 
-                    name="Simulated Policy", 
-                    fill='tozeroy', 
-                    line=dict(color='rgba(255, 165, 0, 0.8)', width=2),
-                    fillcolor='rgba(255, 165, 0, 0.2)'
-                ))
-                
-                fig_wc.update_layout(template="plotly_dark", height=500, hovermode="x unified", yaxis_title="Working Capital ($)", xaxis_title="Days")
+                fig_wc.add_trace(go.Scatter(x=list(range(min_days)), y=(df_audited['Closing Balance'] * u_val).iloc[:min_days], name="Historical Case", fill='tozeroy', line=dict(color='rgba(99, 179, 237, 0.8)', width=2), fillcolor='rgba(99, 179, 237, 0.2)'))
+                fig_wc.add_trace(go.Scatter(x=list(range(min_days)), y=(sdf['Physical'] * u_val).iloc[:min_days], name="Simulated Policy", fill='tozeroy', line=dict(color='rgba(255, 165, 0, 0.8)', width=2), fillcolor='rgba(255, 165, 0, 0.2)'))
+                fig_wc.update_layout(template="plotly_dark", height=450, hovermode="x unified", yaxis_title="Working Capital ($)", xaxis_title="Days")
                 st.plotly_chart(fig_wc, use_container_width=True)
     
-                # --- 5. SEPARATE DETAIL GRAPHS ---
-                st.subheader("📈 Inventory Strategy: Total Position vs. Physical Stock")
+                # --- 6. SIMULATION DETAILS ---
+                st.subheader("📈 Inventory Strategy Details")
                 fig1 = go.Figure()
                 fig1.add_trace(go.Scatter(x=sdf["Day"], y=sdf["Total_Inv"], name="Total Position", line=dict(color="#FFD700", width=1, dash='dash')))
                 fig1.add_trace(go.Scatter(x=sdf["Day"], y=sdf["Physical"], name="Physical Stock", fill='tozeroy', line=dict(color="#00FFCC", width=3)))
@@ -245,6 +233,6 @@ if uploaded_file:
                 fig2 = go.Figure()
                 fig2.add_trace(go.Scatter(x=sdf["Day"], y=sdf["Pipeline"], name="Units In-Transit", line=dict(color="#FF00FF", width=2, shape='hv'), fill='tozeroy', fillcolor='rgba(255, 0, 255, 0.1)'))
                 fig2.update_layout(template="plotly_dark", height=250)
-                st.plotly_chart(fig2, use_container_width=True)    
+                st.plotly_chart(fig2, use_container_width=True)                
 else:
     st.info("👋 Upload historical Excel file to begin.")
