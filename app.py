@@ -170,27 +170,36 @@ if uploaded_file:
                     "Pipeline": pipeline_history, "Total_Inventory": total_inv_pos
                 })
     
-                # --- 3. TOP-LEVEL SIMULATION KPIs ---
+                # --- 3. EXPANDED SIMULATION KPIs ---
                 st.subheader(f"🚀 Simulation Results ({sim_days} Days)")
-                sk1, sk2, sk3, sk4 = st.columns(4)
+                
+                # Row 1: Primary Metrics
+                rk1, rk2, rk3, rk4 = st.columns(4)
                 sim_fr_val = (1 - (sdf['Shortage'].sum() / sdf['Demand'].sum())) * 100
-                sk1.metric("Simulated Fill Rate", f"{sim_fr_val:.1f}%")
-                sk2.metric("Avg Physical Stock", f"{sdf['Physical_Stock'].mean():.1f} Units")
-                sk3.metric("Orders Placed", int(sdf['OrderEvent'].sum()))
-                sk4.metric("Total Stockout Units", int(sdf['Shortage'].sum()), delta_color="inverse")
+                rk1.metric("Simulated Fill Rate", f"{sim_fr_val:.1f}%")
+                rk2.metric("Avg Physical Stock", f"{sdf['Physical_Stock'].mean():.1f} Units")
+                rk3.metric("Avg Working Capital", f"${sdf['Physical_Stock'].mean() * u_val:,.0f}")
+                rk4.metric("Orders Placed", int(sdf['OrderEvent'].sum()))
     
-                # --- 4. INVENTORY MOVEMENT DETAIL (PRIMARY GRAPH) ---
+                # Row 2: Operational Health
+                rk5, rk6, rk7, rk8 = st.columns(4)
+                rk5.metric("Stockout Days", int((sdf['Physical_Stock'] == 0).sum()))
+                rk6.metric("Total Stockout Units", int(sdf['Shortage'].sum()))
+                rk7.metric("Min Inventory", f"{sdf['Physical_Stock'].min():.0f} Units")
+                rk8.metric("Max Inventory", f"{sdf['Physical_Stock'].max():.0f} Units")
+    
+                # --- 4. MOVEMENT GRAPH ---
                 st.subheader("📈 Inventory Movement Detail")
                 fig_mov = go.Figure()
-                fig_mov.add_trace(go.Scatter(x=sdf["Day"], y=sdf["Total_Inventory"], name="Total Position (Dashed)", line=dict(color="#FFD700", dash='dash')))
-                fig_mov.add_trace(go.Scatter(x=sdf["Day"], y=sdf["Physical_Stock"], name="Physical On-Hand (Filled)", fill='tozeroy', line=dict(color="#00FFCC")))
+                fig_mov.add_trace(go.Scatter(x=sdf["Day"], y=sdf["Total_Inventory"], name="Total Position", line=dict(color="#FFD700", dash='dash')))
+                fig_mov.add_trace(go.Scatter(x=sdf["Day"], y=sdf["Physical_Stock"], name="Physical On-Hand", fill='tozeroy', line=dict(color="#00FFCC")))
                 fig_mov.add_hline(y=test_rop, line_dash="dot", line_color="orange", annotation_text=f"ROP: {test_rop}")
                 
                 stockouts = sdf[sdf['Shortage'] > 0]
                 if not stockouts.empty:
                     fig_mov.add_trace(go.Scatter(x=stockouts["Day"], y=stockouts["Physical_Stock"], mode='markers', name="Stockout Event", marker=dict(color='red', size=8, symbol='x')))
                 
-                fig_mov.update_layout(template="plotly_dark", height=450, hovermode="x unified", yaxis_title="Units")
+                fig_mov.update_layout(template="plotly_dark", height=450, hovermode="x unified")
                 st.plotly_chart(fig_mov, use_container_width=True)
     
                 # --- 5. UNIFIED WORKING CAPITAL MAP ---
@@ -198,12 +207,12 @@ if uploaded_file:
                 min_days = min(len(df_audited), len(sdf))
                 fig_wc = go.Figure()
                 fig_wc.add_trace(go.Scatter(x=list(range(min_days)), y=(df_audited['Closing Balance']*u_val).iloc[:min_days], 
-                                           name="Historical Case (Blue)", fill='tozeroy', line=dict(color='rgba(99, 179, 237, 0.8)', width=2),
+                                           name="Historical (Blue)", fill='tozeroy', line=dict(color='rgba(99, 179, 237, 0.8)', width=2),
                                            fillcolor='rgba(99, 179, 237, 0.2)'))
                 fig_wc.add_trace(go.Scatter(x=list(range(min_days)), y=(sdf['Physical_Stock']*u_val).iloc[:min_days], 
-                                           name="Simulated Strategy (Orange)", fill='tozeroy', line=dict(color='rgba(255, 165, 0, 0.8)', width=2),
+                                           name="Simulated (Orange)", fill='tozeroy', line=dict(color='rgba(255, 165, 0, 0.8)', width=2),
                                            fillcolor='rgba(255, 165, 0, 0.2)'))
-                fig_wc.update_layout(template="plotly_dark", height=450, hovermode="x unified", yaxis_title="Working Capital ($)")
+                fig_wc.update_layout(template="plotly_dark", height=450, hovermode="x unified")
                 st.plotly_chart(fig_wc, use_container_width=True)
     
                 # --- 6. ANNUALIZED COMPARATIVE MATH ---
@@ -242,7 +251,7 @@ if uploaded_file:
                                  "Simulated (Test)": f"${sim:,.0f}" if "$" in label else f"{sim:,.1f}", "% Difference": f":{color}[{diff:+.1f}%]"})
                 st.table(pd.DataFrame(rows))
     
-                # --- 8. DETAILED DATA LOGS ---
+                # --- 8. VERTICAL DATA TABLES ---
                 st.divider()
                 st.subheader("📋 Detailed Data Logs")
                 with st.expander("📂 View Audited Historical Data (Healed)"):
