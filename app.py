@@ -6,6 +6,26 @@ import plotly.graph_objects as go
 from prophet import Prophet
 from scipy.stats import norm
 
+st.markdown(
+    """
+    <style>
+        /* Push sidebar content down and right */
+        [data-testid="stSidebarUserContent"] {
+            padding-top: 100px;
+            padding-left: 30px;
+            padding-right: 20px;
+        }
+        
+        /* Ensure the sidebar stays wide enough when zoomed */
+        [data-testid="stSidebar"] {
+            min-width: 350px;
+            max-width: 450px;
+        }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
 # ------------------------------------------------
 # 1. Page Config & Core Logic
 # ------------------------------------------------
