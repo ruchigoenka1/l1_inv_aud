@@ -124,8 +124,10 @@ if uploaded_file:
                 if sel_zone == "All Data":
                     avg_d, std_d = df_full['Demand'].mean(), df_full['Demand'].std()
                 else:
-                    avg_d, std_d = df_full[df_full['Zone'] == sel_zone]['Demand'].mean(), df_full[df_full['Zone'] == sel_zone]['Demand'].std()
+                    avg_d = df_full[df_full['Zone'] == sel_zone]['Demand'].mean()
+                    std_d = df_full[df_full['Zone'] == sel_zone]['Demand'].std()
     
+                # EOQ calculation (Variable Only)
                 annual_d_proj = avg_d * 365
                 var_h_annual_unit = u_val * (h_pct / 100)
                 eoq_val = int(np.sqrt((2 * annual_d_proj * o_cost) / var_h_annual_unit)) if var_h_annual_unit > 0 else 0
@@ -152,62 +154,89 @@ if uploaded_file:
                     
                     pipeline_val = sum(p_orders.values())
                     
+                    order_triggered = 0
                     if (close_s + pipeline_val) <= test_rop and pipeline_val == 0:
                         p_orders[d + int(lt_manual)] = test_qty
                         order_triggered = 1
                         pipeline_val = test_qty 
-                    else:
-                        order_triggered = 0
                     
                     stocks.append(close_s); shortages.append(shrt); sim_demands.append(daily_d)
                     orders_placed.append(order_triggered); pipeline_history.append(pipeline_val)
                     total_inv_pos.append(close_s + pipeline_val); stock = close_s
     
-                sdf = pd.DataFrame({"Day": range(sim_days), "Physical": stocks, "Shortage": shortages, "OrderEvent": orders_placed, "Pipeline": pipeline_history, "Total_Inv": total_inv_pos})
+                sdf = pd.DataFrame({
+                    "Day": range(sim_days), "Physical": stocks, "Shortage": shortages, 
+                    "OrderEvent": orders_placed, "Pipeline": pipeline_history, "Total_Inv": total_inv_pos
+                })
     
                 # --- 3. ANNUALIZED COMPARATIVE TABLE ---
                 orig_n_days = len(df_audited)
+                orig_annual_factor = 365 / orig_n_days
                 orig_avg_stock = df_audited['Closing Balance'].mean()
                 orig_avg_wc = orig_avg_stock * u_val
-                
+                orig_h_annual = (orig_avg_wc * (h_pct/100)) + fixed_wh_cost
+                orig_o_annual = (df_audited['Order Received'].astype(bool).sum() * orig_annual_factor) * o_cost
+                orig_l_annual = (df_audited['Shortage'].sum() * orig_annual_factor) * u_val
+                orig_fr = (1 - (df_audited['Shortage'].sum() / df_audited['Demand'].sum())) * 100
+    
+                sim_annual_factor = 365 / sim_days
                 sim_avg_stock = sdf['Physical'].mean()
                 sim_avg_wc = sim_avg_stock * u_val
+                sim_h_annual = (sim_avg_stock * u_val * (h_pct/100)) + fixed_wh_cost
+                sim_o_annual = (sdf['OrderEvent'].sum() * sim_annual_factor) * o_cost
+                sim_l_annual = (sdf['Shortage'].sum() * sim_annual_factor) * u_val
+                sim_fr = (1 - (sdf['Shortage'].sum() / sdf['Demand'].sum())) * 100
     
                 st.subheader("💰 Annualized Strategy Comparison")
-                # (Math logic same as previous: Annualized Holding/Ordering/Lost Sales)
-                # [Insert Table Logic here if needed - abbreviated for space]
+                metrics = [
+                    ("Avg Inventory (Units)", orig_avg_stock, sim_avg_stock, "lower"),
+                    ("Avg Working Capital ($)", orig_avg_wc, sim_avg_wc, "lower"),
+                    ("Global Fill Rate (%)", orig_fr, sim_fr, "higher"),
+                    ("Annual Holding Cost ($)", orig_h_annual, sim_h_annual, "lower"),
+                    ("Annual Ordering Cost ($)", orig_o_annual, sim_o_annual, "lower"),
+                    ("Annual Lost Sales Revenue ($)", orig_l_annual, sim_l_annual, "lower"),
+                    ("Total Annual Policy Cost ($)", (orig_h_annual+orig_o_annual+orig_l_annual), (sim_h_annual+sim_o_annual+sim_l_annual), "lower")
+                ]
+                rows = []
+                for label, orig, sim, direction in metrics:
+                    diff = ((sim - orig) / orig * 100) if orig != 0 else 0
+                    color = "green" if (direction == "lower" and sim <= orig) or (direction == "higher" and sim >= orig) else "red"
+                    rows.append({"Metric": label, "Original (Audit)": f"${orig:,.0f}" if "$" in label else f"{orig:,.1f}", 
+                                 "Simulated (Test)": f"${sim:,.0f}" if "$" in label else f"{sim:,.1f}", "% Difference": f":{color}[{diff:+.1f}%]"})
+                st.table(pd.DataFrame(rows))
     
                 # --- 4. UNIFIED WORKING CAPITAL MAP ---
                 st.subheader("🏦 Unified Working Capital Comparison ($ Value)")
-                st.info("Both cases are aligned by Day. The x-axis is capped at the shorter dataset's duration for direct comparison.")
-                
-                # Prepare Comparative Dataframe
                 min_days = min(len(df_audited), len(sdf))
                 
-                # Align Original Data to a 'Day' index starting at 0
-                original_wc = (df_audited['Closing Balance'] * u_val).iloc[:min_days].reset_index(drop=True)
-                simulated_wc = (sdf['Physical'] * u_val).iloc[:min_days].reset_index(drop=True)
-                
-                comparison_df = pd.DataFrame({
-                    "Day": range(min_days),
-                    "Historical (Original)": original_wc,
-                    "Simulated (New Policy)": simulated_wc
-                })
-    
                 fig_wc = go.Figure()
-                fig_wc.add_trace(go.Scatter(x=comparison_df["Day"], y=comparison_df["Historical (Original)"], 
-                                           name="Historical Case", fill='tozeroy', line=dict(color='#63B3ED', width=2)))
-                fig_wc.add_trace(go.Scatter(x=comparison_df["Day"], y=comparison_df["Simulated (New Policy)"], 
-                                           name="Simulated Policy", fill='tozeroy', line=dict(color='#FFA500', width=2, opacity=0.5)))
+                # Historical Case (Blue)
+                fig_wc.add_trace(go.Scatter(
+                    x=list(range(min_days)), 
+                    y=(df_audited['Closing Balance'] * u_val).iloc[:min_days], 
+                    name="Historical Case", 
+                    fill='tozeroy', 
+                    line=dict(color='rgba(99, 179, 237, 0.8)', width=2),
+                    fillcolor='rgba(99, 179, 237, 0.2)'
+                ))
+                # Simulated Policy (Orange)
+                fig_wc.add_trace(go.Scatter(
+                    x=list(range(min_days)), 
+                    y=(sdf['Physical'] * u_val).iloc[:min_days], 
+                    name="Simulated Policy", 
+                    fill='tozeroy', 
+                    line=dict(color='rgba(255, 165, 0, 0.8)', width=2),
+                    fillcolor='rgba(255, 165, 0, 0.2)'
+                ))
                 
-                fig_wc.update_layout(template="plotly_dark", height=500, hovermode="x unified", yaxis_title="Working Capital ($)")
+                fig_wc.update_layout(template="plotly_dark", height=500, hovermode="x unified", yaxis_title="Working Capital ($)", xaxis_title="Days")
                 st.plotly_chart(fig_wc, use_container_width=True)
     
-                # --- 5. SEPARATE INVENTORY & PIPELINE GRAPHS ---
-                st.subheader("📈 Simulation Detail: Total Position vs. Physical Stock")
+                # --- 5. SEPARATE DETAIL GRAPHS ---
+                st.subheader("📈 Inventory Strategy: Total Position vs. Physical Stock")
                 fig1 = go.Figure()
-                fig1.add_trace(go.Scatter(x=sdf["Day"], y=sdf["Total_Inv"], name="Total Position (On-Hand+On-Order)", line=dict(color="#FFD700", width=1, dash='dash')))
-                fig1.add_trace(go.Scatter(x=sdf["Day"], y=sdf["Physical"], name="Physical Stock", fill='tozeroy', line=dict(color="#00FFCC", width=2)))
+                fig1.add_trace(go.Scatter(x=sdf["Day"], y=sdf["Total_Inv"], name="Total Position", line=dict(color="#FFD700", width=1, dash='dash')))
+                fig1.add_trace(go.Scatter(x=sdf["Day"], y=sdf["Physical"], name="Physical Stock", fill='tozeroy', line=dict(color="#00FFCC", width=3)))
                 fig1.add_hline(y=test_rop, line_dash="dash", line_color="orange", annotation_text="ROP")
                 fig1.update_layout(template="plotly_dark", height=400)
                 st.plotly_chart(fig1, use_container_width=True)
@@ -216,7 +245,6 @@ if uploaded_file:
                 fig2 = go.Figure()
                 fig2.add_trace(go.Scatter(x=sdf["Day"], y=sdf["Pipeline"], name="Units In-Transit", line=dict(color="#FF00FF", width=2, shape='hv'), fill='tozeroy', fillcolor='rgba(255, 0, 255, 0.1)'))
                 fig2.update_layout(template="plotly_dark", height=250)
-                st.plotly_chart(fig2, use_container_width=True)
-    
+                st.plotly_chart(fig2, use_container_width=True)    
 else:
     st.info("👋 Upload historical Excel file to begin.")
