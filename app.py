@@ -109,19 +109,18 @@ if uploaded_file:
 
     with tab3:
         if 'zone_stats' not in st.session_state:
-            st.warning("Please run Tab 2 (DNA Extraction) first to define the distribution parameters.")
+            st.warning("Please run 'AI DNA Extraction' in Tab 2 first.")
         else:
             z_stats = st.session_state['zone_stats']
             df_full = st.session_state['dna_df']
             
-            # --- 1. Simulation Inputs ---
+            # --- 1. Simulation Controls ---
             sc1, sc2, sc3, sc4 = st.columns(4)
             with sc1: 
-                # Choice of seasonal DNA or the complete historical distribution
                 options = ["All Data"] + list(z_stats['Zone'].unique())
-                sel_zone = st.selectbox("Season to Simulate (Distribution Source)", options)
+                sel_zone = st.selectbox("Season to Simulate", options)
             
-            # Pull stats based on choice
+            # Determine stats based on selection
             if sel_zone == "All Data":
                 avg_d, std_d = df_full['Demand'].mean(), df_full['Demand'].std()
                 default_rop = int(avg_d * lt_manual + (1.65 * std_d)) 
@@ -130,129 +129,105 @@ if uploaded_file:
                 std_d = df_full[df_full['Zone'] == sel_zone]['Demand'].std()
                 default_rop = int(z_stats.loc[z_stats['Zone']==sel_zone, 'ROP'].values[0])
     
-            with sc2: test_rop = st.number_input("Test Reorder Point (ROP)", value=default_rop)
-            with sc3: test_qty = st.number_input("Test Order Quantity (Q)", value=int(test_rop * 1.5 if test_rop > 0 else 100))
-            with sc4: sim_days = st.slider("Simulation Duration (Days)", 30, 365, 90)
+            # --- EOQ Calculation (Variable Logic) ---
+            annual_d_proj = avg_d * 365
+            variable_h_annual = u_val * (h_pct / 100)
+            # EOQ formula: sqrt((2 * Demand * OrderCost) / VariableHolding)
+            eoq_val = int(np.sqrt((2 * annual_d_proj * o_cost) / variable_h_annual)) if variable_h_annual > 0 else 0
+    
+            with sc2: 
+                test_rop = st.number_input("Test Reorder Point (ROP)", value=default_rop)
+            with sc3: 
+                use_eoq = st.checkbox("Use EOQ as Order Qty", value=False)
+                test_qty = st.number_input("Test Order Quantity (Q)", 
+                                           value=eoq_val if use_eoq else int(test_rop * 1.5 if test_rop > 0 else 100))
+            with sc4: 
+                sim_days = st.slider("Simulation Duration (Days)", 30, 365, 365)
     
             if st.button("▶️ Run Stress Test"):
-                # --- 2. Prorated Financial Math ---
-                # H = (Value * Financial %) + Annual Fixed Overhead
-                annual_h_unit = (u_val * (h_pct/100)) + fixed_wh_cost
-                daily_h_rate = annual_h_unit / 365
-                
+                # --- 2. Simulation Logic ---
+                sim_ratio = sim_days / 365
                 stocks, shortages, sim_demands, in_lt_sim, orders_placed_count, inventory_positions = [], [], [], [], [], []
-                stock = test_rop + (test_qty / 2) # Assume starting in a healthy state
+                stock = test_rop + (test_qty / 2) 
                 p_orders = {}
     
-                # --- 3. Simulation Loop ---
                 for d in range(sim_days):
-                    # Demand generation (Forced integer for revenue sync)
                     daily_d = int(max(0, np.random.normal(avg_d, std_d)))
-                    
-                    # Arrival Logic
                     recv = p_orders.pop(d, 0)
                     open_s = stock + recv
-                    
-                    # Fulfillment Logic
                     sales = min(open_s, daily_d)
-                    shrt = int(daily_d - sales) # Strict integer for revenue sync
+                    shrt = int(daily_d - sales) 
                     close_s = open_s - sales
                     
-                    # Reorder Logic (Inventory Position = On Hand + On Order)
                     pipeline_sum = sum(p_orders.values())
                     inv_pos = close_s + pipeline_sum
                     
-                    # Trigger Order only if no order is already in transit
                     order_triggered = 0
                     if inv_pos <= test_rop and pipeline_sum == 0:
                         p_orders[d + int(lt_manual)] = test_qty
                         order_triggered = 1
-                        inv_pos += test_qty # Position jumps immediately
+                        inv_pos += test_qty
                     
-                    stocks.append(close_s)
-                    shortages.append(shrt)
-                    sim_demands.append(daily_d)
-                    in_lt_sim.append(pipeline_sum > 0)
-                    orders_placed_count.append(order_triggered)
-                    inventory_positions.append(inv_pos)
-                    stock = close_s
+                    stocks.append(close_s); shortages.append(shrt); sim_demands.append(daily_d)
+                    in_lt_sim.append(pipeline_sum > 0); orders_placed_count.append(order_triggered)
+                    inventory_positions.append(inv_pos); stock = close_s
     
                 sdf = pd.DataFrame({
-                    "Day": range(sim_days),
-                    "Demand": sim_demands, 
-                    "Physical_Stock": stocks, 
-                    "Shortage": shortages, 
-                    "InLT": in_lt_sim, 
-                    "OrderEvent": orders_placed_count,
-                    "Inv_Position": inventory_positions
+                    "Day": range(sim_days), "Demand": sim_demands, "Physical_Stock": stocks, 
+                    "Shortage": shortages, "InLT": in_lt_sim, "OrderEvent": orders_placed_count, "Inv_Position": inventory_positions
                 })
     
-                # --- 4. Synchronized Master KPIs ---
-                # Financials
-                tot_h_cost = sdf['Physical_Stock'].sum() * daily_h_rate
-                tot_o_cost = sdf['OrderEvent'].sum() * o_cost
-                lost_rev = sdf['Shortage'].sum() * u_val
-                total_cost = tot_h_cost + tot_o_cost + lost_rev
+                # --- 3. KPI CALCULATIONS (Global Fixed Cost Model) ---
+                avg_stock_units = sdf['Physical_Stock'].mean()
+                avg_wc_value = avg_stock_units * u_val
                 
-                # Operational
-                stockout_days = int((sdf['Shortage'] > 0).sum())
-                fill_rate = (1 - (sdf['Shortage'].sum() / sdf['Demand'].sum())) * 100 if sdf['Demand'].sum() > 0 else 100
-                lt_sim_df = sdf[sdf['InLT'] == True]
-                lt_fr = (1 - (lt_sim_df['Shortage'].sum() / lt_sim_df['Demand'].sum())) * 100 if not lt_sim_df.empty else 100
+                # Holding Cost split
+                var_holding_cost = (avg_wc_value * (h_pct / 100)) * sim_ratio
+                fix_holding_cost = fixed_wh_cost * sim_ratio
+                tot_h_cost = var_holding_cost + fix_holding_cost
+                
+                # Other Costs
+                tot_o_cost = sdf['OrderEvent'].sum() * o_cost
+                lost_rev = int(sdf['Shortage'].sum()) * u_val
+                total_inv_cost = tot_h_cost + tot_o_cost + lost_rev
     
-                # --- 5. KPI Display Dashboard ---
+                # --- 4. DISPLAY DASHBOARD ---
                 st.subheader(f"🚀 Business Impact Dashboard ({sim_days} Days)")
                 
-                # Row 1: The "Profit & Loss" view
+                # Row 1: Financial Master View
                 r1c1, r1c2, r1c3, r1c4 = st.columns(4)
-                r1c1.metric("Total Inventory Cost", f"${total_cost:,.0f}", help="Sum of Holding + Ordering + Lost Sales")
-                r1c2.metric("Total Holding Cost", f"${tot_h_cost:,.0f}", help="Financial % + Fixed WH Overhead (Prorated Daily)")
-                r1c3.metric("Total Ordering Cost", f"${tot_o_cost:,.0f}", help=f"{sdf['OrderEvent'].sum()} orders placed")
+                r1c1.metric("Total Inventory Cost", f"${total_inv_cost:,.0f}")
+                r1c2.metric("Total Holding Cost", f"${tot_h_cost:,.0f}", 
+                            help=f"Interest: ${var_holding_cost:,.0f} + Prorated Rent: ${fix_holding_cost:,.0f}")
+                r1c3.metric("Total Ordering Cost", f"${tot_o_cost:,.0f}", help=f"{sdf['OrderEvent'].sum()} orders")
                 r1c4.metric("Lost Sales Revenue", f"${lost_rev:,.0f}", delta=f"{int(sdf['Shortage'].sum())} Units", delta_color="inverse")
     
-                # Row 2: The Operational view
+                # Row 2: Strategy & Benchmark KPIs
                 st.divider()
                 r2c1, r2c2, r2c3, r2c4 = st.columns(4)
-                r2c1.metric("Stockout Days", stockout_days)
-                r2c2.metric("Global Fill Rate", f"{fill_rate:.1f}%")
-                r2c3.metric("LT Fill Rate", f"{lt_fr:.1f}%", help="Fill rate while orders are in the pipeline")
-                r2c4.metric("Avg WC Investment", f"${(sdf['Physical_Stock'].mean() * u_val):,.0f}")
+                r2c1.metric("Suggested EOQ", f"{eoq_val} Units")
+                r2c2.metric("Avg WC Investment", f"${avg_wc_value:,.0f}")
+                r2c3.metric("Global Fill Rate", f"{(1 - (sdf['Shortage'].sum() / sdf['Demand'].sum())) * 100:.1f}%")
+                lt_sim_df = sdf[sdf['InLT']]
+                lt_fr = (1 - (lt_sim_df['Shortage'].sum() / lt_sim_df['Demand'].sum())) * 100 if not lt_sim_df.empty else 100
+                r2c4.metric("LT Fill Rate", f"{lt_fr:.1f}%")
     
-                # --- 6. Enhanced Visualizations ---
+                # --- 5. VISUALIZATIONS ---
                 st.subheader("📈 Inventory Strategy: Physical vs. Pipeline")
                 fig = go.Figure()
-                # Pipeline Position
-                fig.add_trace(go.Scatter(x=sdf["Day"], y=sdf["Inv_Position"], name="Inventory Position (Inc. Pipeline)", 
-                                         line=dict(color="rgba(255, 255, 255, 0.4)", dash="dot")))
-                # Physical Stock
-                fig.add_trace(go.Scatter(x=sdf["Day"], y=sdf["Physical_Stock"], name="Physical Stock", 
-                                         line=dict(color="#00FFCC", width=3), fill='tozeroy', fillcolor='rgba(0, 255, 204, 0.1)'))
-                # Demand Bars
+                fig.add_trace(go.Scatter(x=sdf["Day"], y=sdf["Inv_Position"], name="Inventory Position", line=dict(color="rgba(255, 255, 255, 0.4)", dash="dot")))
+                fig.add_trace(go.Scatter(x=sdf["Day"], y=sdf["Physical_Stock"], name="Physical Stock", line=dict(color="#00FFCC", width=3), fill='tozeroy', fillcolor='rgba(0, 255, 204, 0.1)'))
                 fig.add_trace(go.Bar(x=sdf["Day"], y=sdf["Demand"], name="Daily Demand", opacity=0.2, marker_color="white"))
-                # ROP Horizontal Line
-                fig.add_hline(y=test_rop, line_dash="dash", line_color="orange", annotation_text=f"Reorder Point: {test_rop}")
+                fig.add_hline(y=test_rop, line_dash="dash", line_color="orange", annotation_text=f"ROP: {test_rop}")
                 
-                # Mark Stockout Events with red X
                 stockouts = sdf[sdf['Shortage'] > 0]
                 if not stockouts.empty:
                     fig.add_trace(go.Scatter(x=stockouts["Day"], y=[0]*len(stockouts), mode='markers', name="Stockout", marker=dict(color='red', size=10, symbol='x')))
                 
                 fig.update_layout(template="plotly_dark", height=500, hovermode="x unified")
                 st.plotly_chart(fig, use_container_width=True)
-    
-                # Strategy Guidance
-                annual_d_proj = avg_d * 365
-                eoq_val = np.sqrt((2 * annual_d_proj * o_cost) / annual_h_unit)
-                st.info(f"💡 AI Benchmarking: For this {sel_zone} distribution, the optimal EOQ is **{int(eoq_val)}**. Your test Q is {test_qty}.")
-    
-                # --- 7. Simulated Data Table ---
-                st.divider()
-                with st.expander("📋 Download & View Detailed Simulation Data"):
+                
+                with st.expander("📋 View Simulation Logs"):
                     st.dataframe(sdf, use_container_width=True)
-                    # Export option
-                    buffer = io.BytesIO()
-                    with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-                        sdf.to_excel(writer, index=False)
-                    st.download_button("📥 Download Simulation Excel", data=buffer, file_name=f"stress_test_{sel_zone}.xlsx")
 else:
     st.info("👋 Upload historical Excel file to begin.")
