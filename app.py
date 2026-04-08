@@ -18,20 +18,14 @@ def run_full_audit(df, lt, u_val, h_pct, o_cost):
     df['Date'] = pd.to_datetime(df['Date'])
     df = df.sort_values('Date').reset_index(drop=True)
     
-    # Vectorized order inference
     if "Order Placed" not in df.columns:
         df["Order Placed"] = df["Order Received"].shift(-lt).fillna(0)
     
-    # Financials (Vectorized)
     daily_h_rate = (h_pct / 100) / 365
     df['HoldingCost'] = df['Closing Balance'] * u_val * daily_h_rate
     df['OrderingCost'] = np.where(df['Order Placed'] > 0, o_cost, 0)
-    
-    # Performance Stats
     df['Shortage'] = np.maximum(0, df['Demand'] - (df['Opening Balance'] + df['Order Received']))
     df['IsStockout'] = df['Shortage'] > 0
-    
-    # Lead Time Window Mask
     df['InLT'] = df['Order Placed'].rolling(window=int(lt)+1, min_periods=1).sum() > 0
     
     return df
@@ -48,7 +42,6 @@ def run_prophet_dna(df):
     df['Raw_Seasonal'] = forecast['additive_terms'].values
     df['Smoothed_Seasonal'] = df['Raw_Seasonal'].rolling(window=14, center=True).mean().ffill().bfill()
     
-    # Zone Stratification
     high_v = df['Smoothed_Seasonal'].quantile(0.85)
     low_v = df['Smoothed_Seasonal'].quantile(0.15)
     
@@ -83,7 +76,6 @@ if uploaded_file:
     with tab1:
         total_d = df_audited['Demand'].sum()
         global_fr = (1 - (df_audited['Shortage'].sum() / total_d)) * 100 if total_d > 0 else 100
-        
         lt_df = df_audited[df_audited['InLT'] == True]
         lt_fr = (1 - (lt_df['Shortage'].sum() / lt_df['Demand'].sum())) * 100 if not lt_df.empty else 100
 
@@ -92,18 +84,17 @@ if uploaded_file:
         k1.metric("Stockout Days", int(df_audited['IsStockout'].sum()))
         k2.metric("Global Fill Rate", f"{global_fr:.1f}%")
         k3.metric("LT Fill Rate", f"{lt_fr:.1f}%")
-        k4.metric("Policy Cost", f"${(df_audited['HoldingCost'].sum() + df_audited['OrderingCost'].sum()):,.0f}")
+        k4.metric("Total Policy Cost", f"${(df_audited['HoldingCost'].sum() + df_audited['OrderingCost'].sum()):,.0f}")
 
         fig_audit = go.Figure()
-        fig_audit.add_trace(go.Scatter(x=df_audited["Date"], y=np.where(df_audited["InLT"], df_audited["Closing Balance"].max(), np.nan),
+        fig_audit.add_trace(go.Scatter(x=df_audited["Date"], y=np.where(df_audited["InLT"], df_audited['Closing Balance'].max(), np.nan),
             fill='tozeroy', fillcolor='rgba(255, 0, 0, 0.05)', line=dict(width=0), name="Lead Time Window"))
         fig_audit.add_trace(go.Scatter(x=df_audited["Date"], y=df_audited["Closing Balance"], name="Closing Stock", line=dict(color='#00CCFF', width=2)))
         fig_audit.update_layout(template="plotly_dark", height=450, title="Historical Inventory Flow")
         st.plotly_chart(fig_audit, use_container_width=True)
 
-    # --- TAB 2: DEMAND DNA ---
+    # --- TAB 2: DNA & STRATIFICATION ---
     with tab2:
-        st.header("🕵️ Demand DNA & Stratification")
         if st.button("🚀 Run AI DNA Extraction"):
             st.session_state['dna_df'] = run_prophet_dna(df_audited)
 
@@ -142,7 +133,7 @@ if uploaded_file:
             with sc1: sel_zone = st.selectbox("Season to Simulate", z_stats['Zone'].unique())
             with sc2: test_rop = st.number_input("Test ROP", value=int(z_stats.loc[z_stats['Zone']==sel_zone, 'ROP'].values[0]))
             with sc3: test_qty = st.number_input("Test Order Qty", value=int(test_rop * 1.2))
-            with sc4: sim_days = st.slider("Simulation Days", 30, 365, 90)
+            with sc4: sim_days = st.slider("Simulation Duration", 30, 365, 90)
 
             if st.button("▶️ Run Stress Test"):
                 avg_d = df_full[df_full['Zone'] == sel_zone]['Demand'].mean()
@@ -171,12 +162,13 @@ if uploaded_file:
                     stock = close_s
 
                 sdf = pd.DataFrame({"Day": range(sim_days), "Demand": sim_demands, "Stock": stocks, "Shortage": shortages, "InLT": in_lt_sim, "Placed": orders_placed})
-                
+                sdf['WC_Investment'] = sdf['Stock'] * u_val
+
                 # --- SIMULATION KPIs ---
                 st.subheader("Inventory Operational & Service KPIs")
                 m1, m2, m3, m4 = st.columns(4)
                 m1.metric("Stockout Days", int((sdf['Shortage'] > 0).sum()))
-                fill_rate = (1 - (sdf['Shortage'].sum() / sdf['Demand'].sum())) * 100
+                fill_rate = (1 - (sdf['Shortage'].sum() / sdf['Demand'].sum())) * 100 if sdf['Demand'].sum() > 0 else 100
                 m2.metric("Global Fill Rate", f"{fill_rate:.1f}%")
                 lt_sim_df = sdf[sdf['InLT'] == True]
                 lt_sim_fr = (1 - (lt_sim_df['Shortage'].sum() / lt_sim_df['Demand'].sum())) * 100 if not lt_sim_df.empty else 100
@@ -188,15 +180,29 @@ if uploaded_file:
                 f1.metric("Lost Revenue", f"${(sdf['Shortage'].sum() * u_val):,.0f}", delta=f"{int(sdf['Shortage'].sum())} units", delta_color="inverse")
                 f2.metric("Total Holding Cost", f"${(sdf['Stock'].sum() * u_val * daily_h_rate):,.0f}")
                 f3.metric("Total Ordering Cost", f"${((sdf['Placed'] > 0).sum() * o_cost):,.0f}")
-                f4.metric("Avg WC Investment", f"${(sdf['Stock'].mean() * u_val):,.0f}")
+                f4.metric("Avg WC Investment", f"${sdf['WC_Investment'].mean():,.0f}")
 
-                # Working Capital Graph
-                st.subheader("Working Capital Tie-up ($)")
-                st.plotly_chart(px.line(sdf, x="Day", y=sdf['Stock']*u_val, color_discrete_sequence=['#FFA500']), use_container_width=True)
+                # --- GRAPHS ---
+                st.subheader("📈 Inventory Movement (Stock Level vs. Demand)")
+                fig_stk = go.Figure()
+                fig_stk.add_trace(go.Scatter(x=sdf["Day"], y=sdf["Stock"], name="Physical Stock", line=dict(color="#00FFCC", width=3)))
+                fig_stk.add_trace(go.Bar(x=sdf["Day"], y=sdf["Demand"], name="Daily Demand", opacity=0.3, marker_color="white"))
+                fig_stk.update_layout(template="plotly_dark", height=400, hovermode="x unified")
+                st.plotly_chart(fig_stk, use_container_width=True)
+
+                st.subheader("💰 Working Capital Exposure Over Time")
+                fig_wc = px.line(sdf, x="Day", y="WC_Investment", title="Capital Tie-up ($)", color_discrete_sequence=['#FFA500'])
+                fig_wc.update_layout(template="plotly_dark", height=300)
+                st.plotly_chart(fig_wc, use_container_width=True)
 
                 st.divider()
                 st.subheader("📋 Detailed Simulation Logs")
                 st.dataframe(sdf, use_container_width=True)
+                
+                buffer = io.BytesIO()
+                with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+                    sdf.to_excel(writer, index=False, sheet_name='Stress_Test')
+                st.download_button("📥 Download Simulation Results", data=buffer, file_name="stress_test.xlsx")
 
 else:
-    st.info("👋 Ready to Audit. Upload your Excel file to begin.")
+    st.info("👋 Dashboard ready. Please upload your historical Excel file to begin.")
