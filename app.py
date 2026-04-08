@@ -12,8 +12,8 @@ st.markdown(
     <style>
         /* Sidebar Zoom Buffer */
         [data-testid="stSidebarUserContent"] {
-            padding-top: 80px;
-            padding-left: 20px;
+            padding-top: 20px;
+            padding-left: 50px;
         }
         
         /* Main Title Styling */
