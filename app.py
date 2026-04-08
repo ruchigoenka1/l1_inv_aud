@@ -25,17 +25,15 @@ def run_full_audit(df, lt, u_val, h_pct, o_cost):
     df['HoldingCost'] = df['Closing Balance'] * u_val * daily_h_rate
     df['OrderingCost'] = np.where(df['Order Placed'] > 0, o_cost, 0)
     
-    # Strict Stockout Calculation
+    # Strict Stockout Logic
     df['Shortage'] = np.maximum(0, df['Demand'] - (df['Opening Balance'] + df['Order Received']))
     df['IsStockout'] = df['Shortage'] > 0
-    
-    # Lead Time Window Mask
     df['InLT'] = df['Order Placed'].rolling(window=int(lt)+1, min_periods=1).sum() > 0
     
     return df
 
 def run_prophet_dna(df):
-    """Extracts seasonality and smooths zones."""
+    """AI DNA Extraction & Smoothing."""
     m_df = df[['Date', 'Demand']].rename(columns={'Date': 'ds', 'Demand': 'y'})
     m = Prophet(yearly_seasonality=True, weekly_seasonality=True)
     m.add_seasonality(name='monthly', period=30.5, fourier_order=5)
@@ -48,11 +46,9 @@ def run_prophet_dna(df):
     
     high_v = df['Smoothed_Seasonal'].quantile(0.85)
     low_v = df['Smoothed_Seasonal'].quantile(0.15)
-    
     df['Zone'] = 'Normal Season'
     df.loc[df['Smoothed_Seasonal'] >= high_v, 'Zone'] = 'Peak Season'
     df.loc[df['Smoothed_Seasonal'] <= low_v, 'Zone'] = 'Low Season'
-    
     return df
 
 # ------------------------------------------------
@@ -145,7 +141,7 @@ if uploaded_file:
                     recv = p_orders.pop(d, 0)
                     open_s = stock + recv
                     sales = min(open_s, sim_demands[d])
-                    shrt = max(0, sim_demands[d] - open_s) # Stockout Logic
+                    shrt = max(0, sim_demands[d] - open_s) # Strict Stockout check
                     close_s = open_s - sales
                     
                     placed = 0
@@ -166,19 +162,29 @@ if uploaded_file:
                 k1.metric("Stockout Days", int((sdf['Shortage'] > 0).sum()))
                 fill_rate = (1 - (sdf['Shortage'].sum() / sdf['Demand'].sum())) * 100 if sdf['Demand'].sum() > 0 else 100
                 k2.metric("Global Fill Rate", f"{fill_rate:.1f}%")
+                
                 lt_sim_df = sdf[sdf['InLT'] == True]
                 lt_sim_fr = (1 - (lt_sim_df['Shortage'].sum() / lt_sim_df['Demand'].sum())) * 100 if not lt_sim_df.empty else 100
                 k3.metric("LT Fill Rate", f"{lt_sim_fr:.1f}%")
-                k4.metric("Lost Revenue", f"${(sdf['Shortage'].sum() * u_val):,.0f}", delta=f"{int(sdf['Shortage'].sum())} Units", delta_color="inverse")
+                
+                lost_rev = sdf['Shortage'].sum() * u_val
+                k4.metric("Lost Sales Revenue", f"${lost_rev:,.0f}", delta=f"{int(sdf['Shortage'].sum())} Units", delta_color="inverse")
+
+                st.subheader("Financial Impact & Cash Flow")
+                f1, f2, f3, f4 = st.columns(4)
+                f1.metric("Avg WC Investment", f"${(sdf['Stock'].mean() * u_val):,.0f}")
+                f2.metric("Total Holding Cost", f"${(sdf['Stock'].sum() * u_val * daily_h_rate):,.0f}")
+                f3.metric("Total Ordering Cost", f"${((sdf['Placed'] > 0).sum() * o_cost):,.0f}")
+                f4.metric("Max WC Investment", f"${(sdf['Stock'].max() * u_val):,.0f}")
 
                 # --- INVENTORY MOVEMENT GRAPH ---
                 st.subheader("📈 Inventory Movement (Stock Level vs. Demand)")
                 fig_stk = go.Figure()
-                fig_stk.add_trace(go.Scatter(x=sdf["Day"], y=sdf["Stock"], name="Stock Level", line=dict(color="#00FFCC", width=3)))
-                fig_stk.add_trace(go.Bar(x=sdf["Day"], y=sdf["Demand"], name="Demand", opacity=0.2, marker_color="white"))
+                fig_stk.add_trace(go.Scatter(x=sdf["Day"], y=sdf["Stock"], name="Physical Stock", line=dict(color="#00FFCC", width=3)))
+                fig_stk.add_trace(go.Bar(x=sdf["Day"], y=sdf["Demand"], name="Daily Demand", opacity=0.2, marker_color="white"))
                 fig_stk.add_hline(y=test_rop, line_dash="dash", line_color="orange", annotation_text="ROP")
                 
-                # Marking Stockout Days
+                # Marking Stockout Days with red X
                 stockouts = sdf[sdf['Shortage'] > 0]
                 if not stockouts.empty:
                     fig_stk.add_trace(go.Scatter(x=stockouts["Day"], y=[0]*len(stockouts), mode='markers', name="Stockout Event", marker=dict(color='red', size=10, symbol='x')))
@@ -186,14 +192,11 @@ if uploaded_file:
                 fig_stk.update_layout(template="plotly_dark", height=450)
                 st.plotly_chart(fig_stk, use_container_width=True)
 
-                st.subheader("💰 Financial Impact & Cash Flow")
-                f1, f2, f3 = st.columns(3)
-                f1.metric("Avg WC Investment", f"${(sdf['Stock'].mean() * u_val):,.0f}")
-                f2.metric("Total Holding Cost", f"${(sdf['Stock'].sum() * u_val * daily_h_rate):,.0f}")
-                f3.metric("Total Ordering Cost", f"${((sdf['Placed'] > 0).sum() * o_cost):,.0f}")
+                st.subheader("💰 Working Capital Exposure Over Time")
+                st.plotly_chart(px.line(sdf, x="Day", y=sdf['Stock']*u_val, title="Working Capital Over Time ($)", color_discrete_sequence=['#FFA500']), use_container_width=True)
 
                 st.divider()
                 st.subheader("📋 Detailed Simulation Logs")
                 st.dataframe(sdf, use_container_width=True)
 else:
-    st.info("👋 Upload your Excel audit file to begin.")
+    st.info("👋 Dashboard ready. Please upload your historical Excel file to begin.")
