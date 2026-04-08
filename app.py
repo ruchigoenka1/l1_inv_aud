@@ -164,23 +164,27 @@ if uploaded_file:
                 sdf = pd.DataFrame({"Day": range(sim_days), "Demand": sim_demands, "Stock": stocks, "Shortage": shortages, "InLT": in_lt_sim, "Placed": orders_placed})
                 sdf['WC_Investment'] = sdf['Stock'] * u_val
 
-                # --- SIMULATION KPIs ---
+                # --- SIMULATION KPIs (Including Lost Sales) ---
                 st.subheader("Inventory Operational & Service KPIs")
                 m1, m2, m3, m4 = st.columns(4)
                 m1.metric("Stockout Days", int((sdf['Shortage'] > 0).sum()))
                 fill_rate = (1 - (sdf['Shortage'].sum() / sdf['Demand'].sum())) * 100 if sdf['Demand'].sum() > 0 else 100
                 m2.metric("Global Fill Rate", f"{fill_rate:.1f}%")
+                
+                # Lost Sales KPI (Units and Revenue)
+                lost_units = int(sdf['Shortage'].sum())
+                lost_revenue = lost_units * u_val
+                m3.metric("Lost Sales (Units)", f"{lost_units:,}")
+                m4.metric("Lost Sales Revenue", f"${lost_revenue:,.0f}", delta_color="inverse")
+
+                st.subheader("Financial Impact & Cash Flow")
+                f1, f2, f3, f4 = st.columns(4)
+                f1.metric("Total Holding Cost", f"${(sdf['Stock'].sum() * u_val * daily_h_rate):,.0f}")
+                f2.metric("Total Ordering Cost", f"${((sdf['Placed'] > 0).sum() * o_cost):,.0f}")
+                f3.metric("Avg WC Investment", f"${sdf['WC_Investment'].mean():,.0f}")
                 lt_sim_df = sdf[sdf['InLT'] == True]
                 lt_sim_fr = (1 - (lt_sim_df['Shortage'].sum() / lt_sim_df['Demand'].sum())) * 100 if not lt_sim_df.empty else 100
-                m3.metric("LT Fill Rate", f"{lt_sim_fr:.1f}%")
-                m4.metric("Avg Inv Units", f"{sdf['Stock'].mean():.1f}")
-
-                st.subheader("Financial Impact & Revenue")
-                f1, f2, f3, f4 = st.columns(4)
-                f1.metric("Lost Revenue", f"${(sdf['Shortage'].sum() * u_val):,.0f}", delta=f"{int(sdf['Shortage'].sum())} units", delta_color="inverse")
-                f2.metric("Total Holding Cost", f"${(sdf['Stock'].sum() * u_val * daily_h_rate):,.0f}")
-                f3.metric("Total Ordering Cost", f"${((sdf['Placed'] > 0).sum() * o_cost):,.0f}")
-                f4.metric("Avg WC Investment", f"${sdf['WC_Investment'].mean():,.0f}")
+                f4.metric("LT Fill Rate", f"{lt_sim_fr:.1f}%")
 
                 # --- GRAPHS ---
                 st.subheader("📈 Inventory Movement (Stock Level vs. Demand)")
