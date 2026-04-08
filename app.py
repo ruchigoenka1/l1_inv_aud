@@ -9,7 +9,8 @@ from scipy.stats import norm
 # ------------------------------------------------
 # 1. Page Config & Core Logic
 # ------------------------------------------------
-st.set_config(layout="wide", page_title="AI Inventory Auditor Pro")
+# FIXED: Changed from set_config to set_page_config
+st.set_page_config(layout="wide", page_title="AI Inventory Auditor Pro")
 
 def run_full_audit(df, lt, u_val, h_pct, o_cost):
     """Vectorized historical performance audit."""
@@ -25,13 +26,16 @@ def run_full_audit(df, lt, u_val, h_pct, o_cost):
     df['OrderingCost'] = np.where(df['Order Placed'] > 0, o_cost, 0)
     df['Shortage'] = np.maximum(0, df['Demand'] - (df['Opening Balance'] + df['Order Received']))
     df['IsStockout'] = df['Shortage'] > 0
-    df['InLT'] = df['Order Placed'].rolling(window=lt+1, min_periods=1).sum() > 0
+    
+    # Vectorized Lead Time Shading
+    df['InLT'] = df['Order Placed'].rolling(window=int(lt)+1, min_periods=1).sum() > 0
     
     return df
 
 def run_prophet_dna(df):
     """Vectorized DNA Extraction & Smoothing."""
     m_df = df[['Date', 'Demand']].rename(columns={'Date': 'ds', 'Demand': 'y'})
+    # Prophet logic remains sequential but outputs are handled via vectors
     m = Prophet(yearly_seasonality=True, weekly_seasonality=True)
     m.add_seasonality(name='monthly', period=30.5, fourier_order=5)
     m.fit(m_df)
@@ -41,6 +45,7 @@ def run_prophet_dna(df):
     df['Raw_Seasonal'] = forecast['additive_terms'].values
     df['Smoothed_Seasonal'] = df['Raw_Seasonal'].rolling(window=14, center=True).mean().ffill().bfill()
     
+    # Stratification logic
     high_v = df['Smoothed_Seasonal'].quantile(0.85)
     low_v = df['Smoothed_Seasonal'].quantile(0.15)
     
@@ -95,7 +100,6 @@ if uploaded_file:
         if 'dna_df' in st.session_state:
             df = st.session_state['dna_df']
             
-            # Graph 1: Demand & Trend
             fig_dna = px.scatter(df, x='Date', y='Demand', color='Zone',
                                     color_discrete_map={"Peak Season": "#F56565", "Normal Season": "#63B3ED", "Low Season": "#4FD1C5"})
             fig_dna.add_trace(go.Scatter(x=df['Date'], y=df['Trend'], mode='lines', name='Growth Trend', line=dict(color='#FFA500', width=2, dash='dot')))
@@ -104,23 +108,17 @@ if uploaded_file:
 
             st.divider()
             c_s1, c_s2 = st.columns(2)
-            with c_s1: risk_window = st.slider("Lead Time Window (Days)", 1, 30, lt_manual)
+            with c_s1: risk_window = st.slider("Lead Time Window (Days)", 1, 30, int(lt_manual))
             with c_s2: target_sl = st.slider("Target Service Level (%)", 80, 99, 95) / 100
 
-            # Rolling Window Logic
             df['Rolling_Demand'] = df['Demand'].rolling(window=risk_window).sum()
-            
-            # Graph 2: Rolling Window Line
             fig_roll = px.line(df, x='Date', y='Rolling_Demand', title=f"Rolling Sum of Demand ({risk_window} Days)", color_discrete_sequence=['#00FFCC'])
-            fig_roll.update_layout(template="plotly_dark", height=350)
             st.plotly_chart(fig_roll, use_container_width=True)
 
-            # --- RESTORED HISTOGRAM & TABLE ROW ---
             st.subheader("📊 Strategic Analysis: Probability vs. ROP")
             c_hist, c_table = st.columns([2, 1.5])
             
             with c_hist:
-                # This is the restored histogram
                 fig_hist = px.histogram(df.dropna(subset=['Rolling_Demand']), x="Rolling_Demand", color="Zone", 
                                         barmode='overlay', opacity=0.6,
                                         color_discrete_map={"Peak Season": "#F56565", "Normal Season": "#63B3ED", "Low Season": "#4FD1C5"},
@@ -138,12 +136,9 @@ if uploaded_file:
                 
                 st.write(f"**Calculated Strategy ({int(target_sl*100)}% SL)**")
                 st.table(zone_stats)
-
-            with st.expander("📋 View Detailed Log"):
-                st.dataframe(df[["Date", "Demand", "Rolling_Demand", "Zone"]], use_container_width=True)
+                st.session_state['zone_stats'] = zone_stats
 
     with tab3:
-        # Simulator (Vectorized for Demand Generation)
         st.header("🎮 Strategic Stress Test")
         if 'zone_stats' not in st.session_state:
             st.warning("Please run Tab 2 first.")
@@ -174,7 +169,7 @@ if uploaded_file:
                     stock = open_s - sales
                     stocks.append(stock)
                     if (stock + sum(p_orders.values())) <= test_rop:
-                        p_orders[d + lt_manual] = test_qty
+                        p_orders[d + int(lt_manual)] = test_qty
 
                 sdf = pd.DataFrame({"Day": range(sim_days), "Demand": sim_demands, "Stock": stocks, "Shortage": shortages})
                 
