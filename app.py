@@ -114,36 +114,32 @@ if uploaded_file:
             z_stats = st.session_state['zone_stats']
             df_full = st.session_state['dna_df']
             
-            # --- 1. Simulation Inputs & EOQ Logic ---
-            with st.expander("🛠️ Simulation & Strategy Controls", expanded=True):
+            # --- 1. Simulation Controls ---
+            with st.expander("🛠️ Strategy & Stress Test Controls", expanded=True):
                 sc1, sc2, sc3, sc4 = st.columns(4)
                 with sc1: 
                     options = ["All Data"] + list(z_stats['Zone'].unique())
                     sel_zone = st.selectbox("Distribution Source", options)
                 
-                # Determine stats
+                # Demand Profile
                 if sel_zone == "All Data":
                     avg_d, std_d = df_full['Demand'].mean(), df_full['Demand'].std()
-                    default_rop = int(avg_d * lt_manual + (1.65 * std_d)) 
                 else:
-                    avg_d = df_full[df_full['Zone'] == sel_zone]['Demand'].mean()
-                    std_d = df_full[df_full['Zone'] == sel_zone]['Demand'].std()
-                    default_rop = int(z_stats.loc[z_stats['Zone']==sel_zone, 'ROP'].values[0])
+                    avg_d, std_d = df_full[df_full['Zone'] == sel_zone]['Demand'].mean(), df_full[df_full['Zone'] == sel_zone]['Demand'].std()
     
-                # EOQ Calculation
+                # EOQ calculation (Variable Only)
                 annual_d_proj = avg_d * 365
-                var_h_annual = u_val * (h_pct / 100)
-                eoq_val = int(np.sqrt((2 * annual_d_proj * o_cost) / var_h_annual)) if var_h_annual > 0 else 0
+                var_h_annual_per_unit = u_val * (h_pct / 100)
+                eoq_val = int(np.sqrt((2 * annual_d_proj * o_cost) / var_h_annual_per_unit)) if var_h_annual_per_unit > 0 else 0
     
-                with sc2: test_rop = st.number_input("Test ROP", value=default_rop)
+                with sc2: test_rop = st.number_input("Test ROP", value=int(avg_d * lt_manual * 1.5))
                 with sc3: 
                     use_eoq = st.checkbox("Use EOQ Quantity", value=False)
                     test_qty = st.number_input("Test Order Qty (Q)", value=eoq_val if use_eoq else int(test_rop * 1.5))
                 with sc4: sim_days = st.slider("Simulation Horizon (Days)", 30, 365, 365)
     
-            if st.button("▶️ Run Comparative Stress Test"):
+            if st.button("▶️ Run Comparative Study"):
                 # --- 2. Simulation Logic ---
-                sim_ratio = sim_days / 365
                 stocks, shortages, sim_demands, orders_placed, pipeline_history = [], [], [], [], []
                 stock = test_rop + (test_qty / 2) 
                 p_orders = {}
@@ -168,39 +164,71 @@ if uploaded_file:
                     orders_placed.append(order_triggered); pipeline_history.append(pipeline_val)
                     stock = close_s
     
-                sdf = pd.DataFrame({
-                    "Day": range(sim_days), "Demand": sim_demands, "Stock": stocks, 
-                    "Shortage": shortages, "OrderEvent": orders_placed, "Pipeline": pipeline_history
-                })
+                sdf = pd.DataFrame({"Day": range(sim_days), "Demand": sim_demands, "Stock": stocks, "Shortage": shortages, "OrderEvent": orders_placed, "Pipeline": pipeline_history})
     
-                # --- 3. COMPARATIVE STUDY CALCULATIONS ---
-                # Case A: Original (Historical Audit Data)
-                orig_days = len(df_audited)
-                orig_ratio = orig_days / 365
+                # --- 3. ANNUALIZED COMPARATIVE MATH ---
+                
+                # Case A: Original (Audit) - Prorate upward to 365 days
+                orig_n_days = len(df_audited)
+                orig_annual_factor = 365 / orig_n_days
+                
                 orig_avg_stock = df_audited['Closing Balance'].mean()
-                orig_h = (orig_avg_stock * u_val * (h_pct/100) * orig_ratio) + (fixed_wh_cost * orig_ratio)
-                orig_o = df_audited['Order Received'].astype(bool).sum() * o_cost # Approximation
-                orig_l = df_audited['Shortage'].sum() * u_val
+                # Annual Holding = (Avg Stock * Value * %) + Total Global Fixed Cost
+                orig_h_annual = (orig_avg_stock * u_val * (h_pct/100)) + fixed_wh_cost
+                orig_o_annual = (df_audited['Order Received'].astype(bool).sum() * orig_annual_factor) * o_cost
+                orig_l_annual = (df_audited['Shortage'].sum() * orig_annual_factor) * u_val
                 orig_fr = (1 - (df_audited['Shortage'].sum() / df_audited['Demand'].sum())) * 100
     
-                # Case B: Simulated (Test Policy)
+                # Case B: Simulated (Test) - Prorate upward/downward to 365 days
+                sim_annual_factor = 365 / sim_days
+                
                 sim_avg_stock = sdf['Stock'].mean()
-                sim_h = (sim_avg_stock * u_val * (h_pct/100) * sim_ratio) + (fixed_wh_cost * sim_ratio)
-                sim_o = sdf['OrderEvent'].sum() * o_cost
-                sim_l = sdf['Shortage'].sum() * u_val
+                sim_h_annual = (sim_avg_stock * u_val * (h_pct/100)) + fixed_wh_cost
+                sim_o_annual = (sdf['OrderEvent'].sum() * sim_annual_factor) * o_cost
+                sim_l_annual = (sdf['Shortage'].sum() * sim_annual_factor) * u_val
                 sim_fr = (1 - (sdf['Shortage'].sum() / sdf['Demand'].sum())) * 100
     
-                # --- 4. DISPLAY DASHBOARD ---
-                st.subheader("💰 Comparative Financial Study")
+                # --- 4. DISPLAY TABLE ---
+                st.subheader("💰 Annualized Strategy Comparison (Prorated to 365 Days)")
+                st.info("The table below projects both historical and simulated performance to a full 1-year impact.")
+                
                 comp_data = {
-                    "Metric": ["Avg Inventory (Units)", "Global Fill Rate (%)", "Holding Cost ($)", "Ordering Cost ($)", "Lost Sales Revenue ($)", "Total Inventory Cost ($)"],
-                    "Original (Audit)": [f"{orig_avg_stock:.1f}", f"{orig_fr:.1f}%", f"{orig_h:,.0f}", f"{orig_o:,.0f}", f"{orig_l:,.0f}", f"{(orig_h + orig_o + orig_l):,.0f}"],
-                    "Simulated (Test)": [f"{sim_avg_stock:.1f}", f"{sim_fr:.1f}%", f"{sim_h:,.0f}", f"{sim_o:,.0f}", f"{sim_l:,.0f}", f"{(sim_h + sim_o + sim_l):,.0f}"]
+                    "Metric": [
+                        "Avg Inventory (Units)", 
+                        "Global Fill Rate (%)", 
+                        "Annual Holding Cost ($)", 
+                        "Annual Ordering Cost ($)", 
+                        "Annual Lost Sales Revenue ($)", 
+                        "Total Annual Policy Cost ($)"
+                    ],
+                    "Original (Audit)": [
+                        f"{orig_avg_stock:.1f}", 
+                        f"{orig_fr:.1f}%", 
+                        f"{orig_h_annual:,.0f}", 
+                        f"{orig_o_annual:,.0f}", 
+                        f"{orig_l_annual:,.0f}", 
+                        f"{(orig_h_annual + orig_o_annual + orig_l_annual):,.0f}"
+                    ],
+                    "Simulated (Test)": [
+                        f"{sim_avg_stock:.1f}", 
+                        f"{sim_fr:.1f}%", 
+                        f"{sim_h_annual:,.0f}", 
+                        f"{sim_o_annual:,.0f}", 
+                        f"{sim_l_annual:,.0f}", 
+                        f"{(sim_h_annual + sim_o_annual + sim_l_annual):,.0f}"
+                    ]
                 }
                 st.table(pd.DataFrame(comp_data))
     
-                # --- 5. WORKING CAPITAL MAPS (Comparative) ---
-                st.subheader("🏦 Working Capital Map ($ Value of On-Hand Stock)")
+                # --- 5. PIPELINE & WC VISUALS ---
+                st.subheader("🚠 Stock & Pipeline Analysis")
+                fig_p = go.Figure()
+                fig_p.add_trace(go.Scatter(x=sdf["Day"], y=sdf["Pipeline"], name="Pipeline Inventory (On-Order)", line=dict(color="#FF00FF", dash='dot')))
+                fig_p.add_trace(go.Scatter(x=sdf["Day"], y=sdf["Stock"], name="Physical Stock (On-Hand)", fill='tozeroy', line=dict(color="#00FFCC")))
+                fig_p.add_hline(y=test_rop, line_dash="dash", line_color="orange", annotation_text=f"ROP: {test_rop}")
+                st.plotly_chart(fig_p, use_container_width=True)
+    
+                st.subheader("🏦 Working Capital Map ($)")
                 c1, c2 = st.columns(2)
                 with c1:
                     st.write("**Original Historical Case**")
@@ -208,18 +236,5 @@ if uploaded_file:
                 with c2:
                     st.write("**Simulated Strategy Case**")
                     st.plotly_chart(px.area(sdf, x="Day", y=sdf["Stock"]*u_val, color_discrete_sequence=['#FFA500']), use_container_width=True)
-    
-                # --- 6. PIPELINE & ROP GRAPH ---
-                st.subheader("🚠 Pipeline & Stock Position Analysis")
-                fig_pipe = go.Figure()
-                fig_pipe.add_trace(go.Scatter(x=sdf["Day"], y=sdf["Pipeline"], name="Pipeline Inventory (In-Transit)", line=dict(color="#FF00FF", width=2, dash='dot')))
-                fig_pipe.add_trace(go.Scatter(x=sdf["Day"], y=sdf["Stock"], name="Physical Stock (On-Hand)", fill='tozeroy', line=dict(color="#00FFCC")))
-                fig_pipe.add_hline(y=test_rop, line_dash="dash", line_color="orange", annotation_text="ROP")
-                fig_pipe.update_layout(template="plotly_dark", height=400)
-                st.plotly_chart(fig_pipe, use_container_width=True)
-    
-                # --- 7. SIMULATED LOG DATA ---
-                with st.expander("📋 View Raw Simulated Log Data"):
-                    st.dataframe(sdf, use_container_width=True)
 else:
     st.info("👋 Upload historical Excel file to begin.")
