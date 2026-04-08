@@ -9,7 +9,6 @@ from scipy.stats import norm
 # ------------------------------------------------
 # 1. Page Config & Core Logic
 # ------------------------------------------------
-# FIXED: Changed from set_config to set_page_config
 st.set_page_config(layout="wide", page_title="AI Inventory Auditor Pro")
 
 def run_full_audit(df, lt, u_val, h_pct, o_cost):
@@ -27,7 +26,7 @@ def run_full_audit(df, lt, u_val, h_pct, o_cost):
     df['Shortage'] = np.maximum(0, df['Demand'] - (df['Opening Balance'] + df['Order Received']))
     df['IsStockout'] = df['Shortage'] > 0
     
-    # Vectorized Lead Time Shading
+    # Vectorized Lead Time Window Shading
     df['InLT'] = df['Order Placed'].rolling(window=int(lt)+1, min_periods=1).sum() > 0
     
     return df
@@ -35,7 +34,6 @@ def run_full_audit(df, lt, u_val, h_pct, o_cost):
 def run_prophet_dna(df):
     """Vectorized DNA Extraction & Smoothing."""
     m_df = df[['Date', 'Demand']].rename(columns={'Date': 'ds', 'Demand': 'y'})
-    # Prophet logic remains sequential but outputs are handled via vectors
     m = Prophet(yearly_seasonality=True, weekly_seasonality=True)
     m.add_seasonality(name='monthly', period=30.5, fourier_order=5)
     m.fit(m_df)
@@ -76,6 +74,7 @@ if uploaded_file:
     
     tab1, tab2, tab3 = st.tabs(["📊 Performance Audit", "🕵️ Demand DNA & Zones", "🎮 Strategy Simulator"])
 
+    # --- TAB 1: AUDIT ---
     with tab1:
         total_d = df_audited['Demand'].sum()
         fill_rate = (1 - (df_audited['Shortage'].sum() / total_d)) * 100 if total_d > 0 else 100
@@ -92,6 +91,7 @@ if uploaded_file:
         fig_audit.update_layout(template="plotly_dark", height=450, title="Historical Inventory Flow")
         st.plotly_chart(fig_audit, use_container_width=True)
 
+    # --- TAB 2: DEMAND DNA ---
     with tab2:
         st.header("🕵️ Demand DNA & Stratification")
         if st.button("🚀 Run AI DNA Extraction"):
@@ -100,6 +100,7 @@ if uploaded_file:
         if 'dna_df' in st.session_state:
             df = st.session_state['dna_df']
             
+            # Graph 1: Demand & Trend
             fig_dna = px.scatter(df, x='Date', y='Demand', color='Zone',
                                     color_discrete_map={"Peak Season": "#F56565", "Normal Season": "#63B3ED", "Low Season": "#4FD1C5"})
             fig_dna.add_trace(go.Scatter(x=df['Date'], y=df['Trend'], mode='lines', name='Growth Trend', line=dict(color='#FFA500', width=2, dash='dot')))
@@ -111,33 +112,35 @@ if uploaded_file:
             with c_s1: risk_window = st.slider("Lead Time Window (Days)", 1, 30, int(lt_manual))
             with c_s2: target_sl = st.slider("Target Service Level (%)", 80, 99, 95) / 100
 
+            # Rolling Window Line
             df['Rolling_Demand'] = df['Demand'].rolling(window=risk_window).sum()
             fig_roll = px.line(df, x='Date', y='Rolling_Demand', title=f"Rolling Sum of Demand ({risk_window} Days)", color_discrete_sequence=['#00FFCC'])
             st.plotly_chart(fig_roll, use_container_width=True)
 
-            st.subheader("📊 Strategic Analysis: Probability vs. ROP")
-            c_hist, c_table = st.columns([2, 1.5])
+            # --- HISTOGRAM (Full Width) ---
+            st.subheader("📊 Probability Distribution of Lead-Time Demand")
+            fig_hist = px.histogram(df.dropna(subset=['Rolling_Demand']), x="Rolling_Demand", color="Zone", 
+                                    barmode='overlay', opacity=0.6,
+                                    color_discrete_map={"Peak Season": "#F56565", "Normal Season": "#63B3ED", "Low Season": "#4FD1C5"})
+            fig_hist.update_layout(template="plotly_dark", height=400)
+            st.plotly_chart(fig_hist, use_container_width=True)
+
+            # --- TABLE (Now Below Histogram) ---
+            st.subheader("🛡️ Strategic Analysis & Safety Stock")
+            z_score = norm.ppf(target_sl)
+            zone_stats = df.dropna(subset=['Rolling_Demand']).groupby('Zone')['Rolling_Demand'].agg(['mean', 'std', 'max']).reset_index()
+            zone_stats.columns = ['Zone', 'Avg Window Demand', 'Volatility (StdDev)', 'Absolute Max']
+            zone_stats['Rec. Safety Stock'] = (z_score * zone_stats['Volatility (StdDev)']).round(0)
+            zone_stats['Reorder Point (ROP)'] = (zone_stats['Avg Window Demand'] + zone_stats['Rec. Safety Stock']).round(0)
+            zone_stats['The Risk Gap'] = (zone_stats['Absolute Max'] - zone_stats['Reorder Point (ROP)']).round(0)
             
-            with c_hist:
-                fig_hist = px.histogram(df.dropna(subset=['Rolling_Demand']), x="Rolling_Demand", color="Zone", 
-                                        barmode='overlay', opacity=0.6,
-                                        color_discrete_map={"Peak Season": "#F56565", "Normal Season": "#63B3ED", "Low Season": "#4FD1C5"},
-                                        title="Probability Distribution of Lead-Time Demand")
-                fig_hist.update_layout(template="plotly_dark", height=400)
-                st.plotly_chart(fig_hist, use_container_width=True)
+            st.table(zone_stats)
+            st.session_state['zone_stats'] = zone_stats
 
-            with c_table:
-                z_score = norm.ppf(target_sl)
-                zone_stats = df.dropna(subset=['Rolling_Demand']).groupby('Zone')['Rolling_Demand'].agg(['mean', 'std', 'max']).reset_index()
-                zone_stats.columns = ['Zone', 'Avg Window Demand', 'Volatility (StdDev)', 'Absolute Max']
-                zone_stats['Rec. Safety Stock'] = (z_score * zone_stats['Volatility (StdDev)']).round(0)
-                zone_stats['Reorder Point (ROP)'] = (zone_stats['Avg Window Demand'] + zone_stats['Rec. Safety Stock']).round(0)
-                zone_stats['The Risk Gap'] = (zone_stats['Absolute Max'] - zone_stats['Reorder Point (ROP)']).round(0)
-                
-                st.write(f"**Calculated Strategy ({int(target_sl*100)}% SL)**")
-                st.table(zone_stats)
-                st.session_state['zone_stats'] = zone_stats
+            with st.expander("📋 View Detailed Log"):
+                st.dataframe(df[["Date", "Demand", "Rolling_Demand", "Zone"]], use_container_width=True)
 
+    # --- TAB 3: SIMULATOR ---
     with tab3:
         st.header("🎮 Strategic Stress Test")
         if 'zone_stats' not in st.session_state:
