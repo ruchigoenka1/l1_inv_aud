@@ -5,7 +5,6 @@ import plotly.express as px
 import plotly.graph_objects as go
 from prophet import Prophet
 from scipy.stats import norm
-import io
 
 # ------------------------------------------------
 # 1. Page Config & Core Logic
@@ -13,12 +12,12 @@ import io
 st.set_page_config(layout="wide", page_title="AI Inventory Auditor Pro")
 
 def run_full_audit(df, lt, u_val, h_pct, o_cost):
-    """Historical Audit with Automatic Date Healing & Gap Filling."""
+    """Historical Audit with Automatic Date Healing."""
     df.columns = [c.strip().title() for c in df.columns]
     df['Date'] = pd.to_datetime(df['Date'])
     df = df.sort_values('Date')
 
-    # --- DATE HEALING ---
+    # Date Healing Logic (Fills gaps in the calendar)
     full_range = pd.date_range(start=df['Date'].min(), end=df['Date'].max(), freq='D')
     df = df.set_index('Date').reindex(full_range).reset_index()
     df.rename(columns={'index': 'Date'}, inplace=True)
@@ -67,8 +66,7 @@ lt_manual = st.sidebar.number_input("Actual Lead Time (Days)", value=3, step=1)
 
 st.sidebar.divider()
 st.sidebar.header("Warehouse Overheads")
-fixed_wh_cost = st.sidebar.number_input("Total Annual Fixed Warehouse Cost ($)", value=1000.0, 
-                                       help="Global annual overhead (Rent/Labor).")
+fixed_wh_cost = st.sidebar.number_input("Total Annual Fixed Warehouse Cost ($)", value=1000.0)
 
 # ------------------------------------------------
 # 3. Main Dashboard
@@ -79,6 +77,7 @@ if uploaded_file:
     
     tab1, tab2, tab3 = st.tabs(["📊 Performance Audit", "🕵️ Demand DNA", "🎮 Stress Test Simulator"])
 
+    # --- TAB 1: AUDIT ---
     with tab1:
         total_d = df_audited['Demand'].sum()
         k1, k2, k3, k4 = st.columns(4)
@@ -90,25 +89,29 @@ if uploaded_file:
         k4.metric("Avg Inventory", f"{df_audited['Closing Balance'].mean():.1f}")
         st.plotly_chart(px.line(df_audited, x="Date", y="Closing Balance", title="Historical Stock Flow", template="plotly_dark"), use_container_width=True)
 
+    # --- TAB 2: DNA ---
     with tab2:
         if st.button("🚀 Run AI DNA Extraction"):
             st.session_state['dna_df'] = run_prophet_dna(df_audited)
         if 'dna_df' in st.session_state:
             df = st.session_state['dna_df']
-            st.plotly_chart(px.scatter(df, x='Date', y='Demand', color='Zone', color_discrete_map={"Peak Season": "#F56565", "Normal Season": "#63B3ED", "Low Season": "#4FD1C5"}), use_container_width=True)
+            st.plotly_chart(px.scatter(df, x='Date', y='Demand', color='Zone', title="Seasonal Demand Zones"), use_container_width=True)
             
             c_s1, c_s2 = st.columns(2)
-            with c_s1: risk_window = st.slider("Lead Time Window", 1, 30, int(lt_manual))
+            with c_s1: risk_window = st.slider("Lead Time Window (Days)", 1, 30, int(lt_manual))
             with c_s2: target_sl = st.slider("Target Service Level (%)", 80, 99, 95) / 100
             
             df['Rolling_Demand'] = df['Demand'].rolling(window=risk_window).sum()
+            st.subheader("📊 Probability Distribution (Lead-Time Demand)")
+            st.plotly_chart(px.histogram(df.dropna(subset=['Rolling_Demand']), x="Rolling_Demand", color="Zone", barmode='overlay', title="Demand Distribution by DNA Zone"), use_container_width=True)
+
             z_score = norm.ppf(target_sl)
-            zone_stats = df.dropna(subset=['Rolling_Demand']).groupby('Zone')['Rolling_Demand'].agg(['mean', 'std', 'max']).reset_index()
-            zone_stats.columns = ['Zone', 'Avg Window Demand', 'Volatility (StdDev)', 'Absolute Max']
-            zone_stats['ROP'] = (zone_stats['Avg Window Demand'] + (z_score * zone_stats['Volatility (StdDev)'])).round(0)
+            zone_stats = df.dropna(subset=['Rolling_Demand']).groupby('Zone')['Rolling_Demand'].agg(['mean', 'std']).reset_index()
+            zone_stats['ROP'] = (zone_stats['mean'] + (z_score * zone_stats['std'])).round(0)
             st.table(zone_stats)
             st.session_state['zone_stats'] = zone_stats
 
+    # --- TAB 3: SIMULATOR ---
     with tab3:
         if 'zone_stats' not in st.session_state:
             st.warning("Please run Tab 2 first.")
@@ -116,28 +119,26 @@ if uploaded_file:
             z_stats = st.session_state['zone_stats']
             df_full = st.session_state['dna_df']
             
-            with st.expander("🛠️ Strategy & Stress Test Controls", expanded=True):
+            with st.expander("🛠️ Strategy Controls", expanded=True):
                 sc1, sc2, sc3, sc4 = st.columns(4)
                 with sc1: 
-                    options = ["All Data"] + list(z_stats['Zone'].unique())
-                    sel_zone = st.selectbox("Distribution Source", options)
+                    sel_zone = st.selectbox("Distribution Source", ["All Data"] + list(z_stats['Zone'].unique()))
                 
-                if sel_zone == "All Data":
-                    avg_d, std_d = df_full['Demand'].mean(), df_full['Demand'].std()
-                else:
-                    avg_d, std_d = df_full[df_full['Zone'] == sel_zone]['Demand'].mean(), df_full[df_full['Zone'] == sel_zone]['Demand'].std()
+                avg_d, std_d = (df_full['Demand'].mean(), df_full['Demand'].std()) if sel_zone == "All Data" else (df_full[df_full['Zone'] == sel_zone]['Demand'].mean(), df_full[df_full['Zone'] == sel_zone]['Demand'].std())
 
+                # EOQ (Variable Only)
                 annual_d_proj = avg_d * 365
-                var_h_annual_unit = u_val * (h_pct / 100)
-                eoq_val = int(np.sqrt((2 * annual_d_proj * o_cost) / var_h_annual_unit)) if var_h_annual_unit > 0 else 0
+                var_h_unit = u_val * (h_pct / 100)
+                eoq_val = int(np.sqrt((2 * annual_d_proj * o_cost) / var_h_unit)) if var_h_unit > 0 else 0
 
                 with sc2: test_rop = st.number_input("Test ROP", value=int(avg_d * lt_manual * 1.2))
                 with sc3: 
-                    use_eoq = st.checkbox("Use EOQ Quantity", value=False)
-                    test_qty = st.number_input("Test Order Qty (Q)", value=eoq_val if use_eoq else int(test_rop * 1.5))
-                with sc4: sim_days = st.slider("Simulation Horizon (Days)", 30, 365, 365)
+                    use_eoq = st.checkbox("Use EOQ Quantity")
+                    test_qty = st.number_input("Test Qty", value=eoq_val if use_eoq else int(test_rop * 1.5))
+                with sc4: sim_days = st.slider("Simulation Days", 30, 365, 365)
 
             if st.button("▶️ Run Comparative Study"):
+                # Simulation Logic
                 stocks, shortages, sim_demands, orders_placed, pipeline_history, total_inv_pos = [], [], [], [], [], []
                 stock = test_rop + (test_qty / 2) 
                 p_orders = {}
@@ -151,48 +152,40 @@ if uploaded_file:
                     close_s = open_s - sales
                     
                     pipeline_val = sum(p_orders.values())
-                    inv_pos = close_s + pipeline_val
-                    
-                    order_triggered = 0
-                    if inv_pos <= test_rop and pipeline_val == 0:
+                    if (close_s + pipeline_val) <= test_rop and pipeline_val == 0:
                         p_orders[d + int(lt_manual)] = test_qty
                         order_triggered = 1
                         pipeline_val = test_qty 
+                    else: order_triggered = 0
                     
                     stocks.append(close_s); shortages.append(shrt); sim_demands.append(daily_d)
                     orders_placed.append(order_triggered); pipeline_history.append(pipeline_val)
-                    total_inv_pos.append(inv_pos); stock = close_s
+                    total_inv_pos.append(close_s + pipeline_val); stock = close_s
 
                 sdf = pd.DataFrame({"Day": range(sim_days), "Demand": sim_demands, "Physical": stocks, "Shortage": shortages, "OrderEvent": orders_placed, "Pipeline": pipeline_history, "Total_Inv": total_inv_pos})
 
                 # Comparative Math
-                orig_n_days = len(df_audited)
-                orig_annual_factor = 365 / orig_n_days
-                orig_avg_stock = df_audited['Closing Balance'].mean()
-                orig_avg_wc = orig_avg_stock * u_val
-                orig_h_annual = (orig_avg_wc * (h_pct/100)) + fixed_wh_cost
-                orig_o_annual = (df_audited['Order Received'].astype(bool).sum() * orig_annual_factor) * o_cost
-                orig_l_annual = (df_audited['Shortage'].sum() * orig_annual_factor) * u_val
+                orig_days = len(df_audited)
+                orig_factor = 365 / orig_days
+                orig_avg_s = df_audited['Closing Balance'].mean()
                 orig_fr = (1 - (df_audited['Shortage'].sum() / df_audited['Demand'].sum())) * 100
-
-                sim_annual_factor = 365 / sim_days
-                sim_avg_stock = sdf['Physical'].mean()
-                sim_avg_wc = sim_avg_stock * u_val
-                sim_h_annual = (sim_avg_wc * (h_pct/100)) + fixed_wh_cost
-                sim_o_annual = (sdf['OrderEvent'].sum() * sim_annual_factor) * o_cost
-                sim_l_annual = (sdf['Shortage'].sum() * sim_annual_factor) * u_val
+                
+                sim_factor = 365 / sim_days
+                sim_avg_s = sdf['Physical'].mean()
                 sim_fr = (1 - (sdf['Shortage'].sum() / sdf['Demand'].sum())) * 100
 
+                # --- 1. Annualized Comparative Table ---
                 st.subheader("💰 Annualized Comparative Financial Study")
+                
                 metrics = [
-                    ("Avg Inventory (Units)", orig_avg_stock, sim_avg_stock, "lower"),
-                    ("Avg Working Capital ($)", orig_avg_wc, sim_avg_wc, "lower"),
+                    ("Avg Inventory (Units)", orig_avg_s, sim_avg_s, "lower"),
+                    ("Avg Working Capital ($)", orig_avg_s * u_val, sim_avg_s * u_val, "lower"),
                     ("Global Fill Rate (%)", orig_fr, sim_fr, "higher"),
-                    ("Annual Holding Cost ($)", orig_h_annual, sim_h_annual, "lower"),
-                    ("Annual Ordering Cost ($)", orig_o_annual, sim_o_annual, "lower"),
-                    ("Annual Lost Sales Revenue ($)", orig_l_annual, sim_l_annual, "lower"),
-                    ("Total Annual Policy Cost ($)", (orig_h_annual+orig_o_annual+orig_l_annual), (sim_h_annual+sim_o_annual+sim_l_annual), "lower")
+                    ("Annual Holding Cost ($)", (orig_avg_s * u_val * (h_pct/100)) + fixed_wh_cost, (sim_avg_s * u_val * (h_pct/100)) + fixed_wh_cost, "lower"),
+                    ("Annual Ordering Cost ($)", (df_audited['Order Received'].astype(bool).sum() * orig_factor * o_cost), (sdf['OrderEvent'].sum() * sim_factor * o_cost), "lower"),
+                    ("Annual Lost Sales ($)", (df_audited['Shortage'].sum() * orig_factor * u_val), (sdf['Shortage'].sum() * sim_factor * u_val), "lower")
                 ]
+                
                 rows = []
                 for label, orig, sim, direction in metrics:
                     diff = ((sim - orig) / orig * 100) if orig != 0 else 0
@@ -200,26 +193,25 @@ if uploaded_file:
                     rows.append({"Metric": label, "Original (Audit)": f"${orig:,.0f}" if "$" in label else f"{orig:,.1f}", "Simulated (Test)": f"${sim:,.0f}" if "$" in label else f"{sim:,.1f}", "% Difference": f":{color}[{diff:+.1f}%]"})
                 st.table(pd.DataFrame(rows))
 
+                # --- 2. Unified Working Capital Comparison ---
                 st.subheader("🏦 Unified Working Capital Comparison ($ Value)")
                 min_days = min(len(df_audited), len(sdf))
                 fig_wc = go.Figure()
-                fig_wc.add_trace(go.Scatter(x=list(range(min_days)), y=(df_audited['Closing Balance'] * u_val).iloc[:min_days], name="Historical Case", fill='tozeroy', line=dict(color='rgba(99, 179, 237, 0.8)', width=2), fillcolor='rgba(99, 179, 237, 0.2)'))
-                fig_wc.add_trace(go.Scatter(x=list(range(min_days)), y=(sdf['Physical'] * u_val).iloc[:min_days], name="Simulated Policy", fill='tozeroy', line=dict(color='rgba(255, 165, 0, 0.8)', width=2), fillcolor='rgba(255, 165, 0, 0.2)'))
-                fig_wc.update_layout(template="plotly_dark", height=450, hovermode="x unified", yaxis_title="Working Capital ($)")
+                fig_wc.add_trace(go.Scatter(x=list(range(min_days)), y=(df_audited['Closing Balance']*u_val).iloc[:min_days], name="Historical", fill='tozeroy', line=dict(color='rgba(99, 179, 237, 0.8)')))
+                fig_wc.add_trace(go.Scatter(x=list(range(min_days)), y=(sdf['Physical']*u_val).iloc[:min_days], name="Simulated Policy", fill='tozeroy', line=dict(color='rgba(255, 165, 0, 0.5)')))
+                fig_wc.update_layout(template="plotly_dark", height=450, yaxis_title="Working Capital ($)")
                 st.plotly_chart(fig_wc, use_container_width=True)
 
-                st.subheader("📈 Inventory Strategy Details")
+                # --- 3. Detail Visuals ---
+                st.subheader("📈 Inventory Strategy: Total Position vs Physical Stock")
                 fig1 = go.Figure()
-                fig1.add_trace(go.Scatter(x=sdf["Day"], y=sdf["Total_Inv"], name="Total Position", line=dict(color="#FFD700", width=1, dash='dash')))
-                fig1.add_trace(go.Scatter(x=sdf["Day"], y=sdf["Physical"], name="Physical Stock", fill='tozeroy', line=dict(color="#00FFCC", width=3)))
+                fig1.add_trace(go.Scatter(x=sdf["Day"], y=sdf["Total_Inv"], name="Total Position (Dashed)", line=dict(color="#FFD700", dash='dash')))
+                fig1.add_trace(go.Scatter(x=sdf["Day"], y=sdf["Physical"], name="Physical Stock (Filled)", fill='tozeroy', line=dict(color="#00FFCC")))
                 fig1.add_hline(y=test_rop, line_dash="dash", line_color="orange", annotation_text="ROP")
-                fig1.update_layout(template="plotly_dark", height=400)
                 st.plotly_chart(fig1, use_container_width=True)
 
-                st.subheader("🚠 Isolated Pipeline Flow (In-Transit)")
+                st.subheader("🚠 Isolated Pipeline Flow (Orders In-Transit)")
                 fig2 = go.Figure()
-                fig2.add_trace(go.Scatter(x=sdf["Day"], y=sdf["Pipeline"], name="Units In-Transit", line=dict(color="#FF00FF", width=2, shape='hv'), fill='tozeroy', fillcolor='rgba(255, 0, 255, 0.1)'))
+                fig2.add_trace(go.Scatter(x=sdf["Day"], y=sdf["Pipeline"], name="Pipeline Units", line=dict(color="#FF00FF", width=2, shape='hv'), fill='tozeroy', fillcolor='rgba(255, 0, 255, 0.1)'))
                 fig2.update_layout(template="plotly_dark", height=250)
                 st.plotly_chart(fig2, use_container_width=True)
-else:
-    st.info("👋 Upload Excel to begin.")
